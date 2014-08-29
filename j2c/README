@@ -1,0 +1,10 @@
+First, you need to set JULIA_ROOT environment to the full path to this
+directory. This is where j2c output file, and object file will be stored.
+
+To run J2C example, go to the julia/test directory, run:
+
+  ../julia j2c.jl
+
+It should finish without any error. Check julia/j2c directory for the 
+intermediate files during J2C compilation.
+

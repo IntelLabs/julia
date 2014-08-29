@@ -766,20 +766,21 @@ static Value *emit_smod(Value *x, Value *den, jl_codectx_t *ctx)
     case intr: if (nargs!=n) jl_error(#intr": wrong number of arguments");
 
 static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
-                             jl_codectx_t *ctx)
+                             jl_codectx_t *ctx, jl_value_t* ast_node)
 {
     switch (f) {
-    case ccall: return emit_ccall(args, nargs, ctx);
+    case ccall: return emit_ccall(args, nargs, ctx, ast_node);
     case cglobal: return emit_cglobal(args, nargs, ctx);
 
-    HANDLE(box,2)         return generic_box(args[1], args[2], ctx);
-    HANDLE(unbox,2)       return generic_unbox(args[1], args[2], ctx);
-    HANDLE(trunc_int,2)   return generic_trunc(args[1], args[2], ctx);
-    HANDLE(sext_int,2)    return generic_sext(args[1], args[2], ctx);
-    HANDLE(zext_int,2)    return generic_zext(args[1], args[2], ctx);
-    HANDLE(pointerref,2)  return emit_pointerref(args[1], args[2], ctx);
-    HANDLE(pointerset,3)  return emit_pointerset(args[1], args[2], args[3], ctx);
+    HANDLE(box,2)         { Value* val = generic_box(args[1], args[2], ctx); if (in_j2c) j2c_box_unbox(ast_node, args[1], args[2], ctx); return val; }
+    HANDLE(unbox,2)       { Value* val = generic_unbox(args[1], args[2], ctx); if (in_j2c) j2c_box_unbox(ast_node, args[1], args[2], ctx); return val; }
+    HANDLE(trunc_int,2)   J2C_UNIMPL_INTRINSIC(f); return generic_trunc(args[1], args[2], ctx);
+    HANDLE(sext_int,2)    J2C_UNIMPL_INTRINSIC(f); return generic_sext(args[1], args[2], ctx);
+    HANDLE(zext_int,2)    J2C_UNIMPL_INTRINSIC(f); return generic_zext(args[1], args[2], ctx);
+    HANDLE(pointerref,2)  J2C_UNIMPL_INTRINSIC(f); return emit_pointerref(args[1], args[2], ctx);
+    HANDLE(pointerset,3)  J2C_UNIMPL_INTRINSIC(f); return emit_pointerset(args[1], args[2], args[3], ctx);
     HANDLE(pointertoref,1) {
+        J2C_UNIMPL_INTRINSIC(f); 
         Value *p = auto_unbox(args[1], ctx);
         if (p->getType()->isIntegerTy()) {
             return builder.CreateIntToPtr(p, jl_pvalue_llvmt);
@@ -787,17 +788,19 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
         return builder.CreateBitCast(p, jl_pvalue_llvmt);
     }
     HANDLE(checked_fptosi,2) {
+        J2C_UNIMPL_INTRINSIC(f); 
         Value *x = FP(auto_unbox(args[2], ctx));
         return emit_checked_fptosi(args[1], x, ctx);
     }
     HANDLE(checked_fptoui,2) {
+        J2C_UNIMPL_INTRINSIC(f); 
         Value *x = FP(auto_unbox(args[2], ctx));
         return emit_checked_fptoui(args[1], x, ctx);
     }
-    HANDLE(uitofp,2) return builder.CreateUIToFP(JL_INT(auto_unbox(args[2],ctx)), FTnbits(try_to_determine_bitstype_nbits(args[1],ctx)));
-    HANDLE(sitofp,2) return builder.CreateSIToFP(JL_INT(auto_unbox(args[2],ctx)), FTnbits(try_to_determine_bitstype_nbits(args[1],ctx)));
-    HANDLE(fptrunc,2) return builder.CreateFPTrunc(FP(auto_unbox(args[2],ctx)), FTnbits(try_to_determine_bitstype_nbits(args[1],ctx)));
-    HANDLE(fpext,2) {
+    HANDLE(uitofp,2) J2C_UNIMPL_INTRINSIC(f); return builder.CreateUIToFP(JL_INT(auto_unbox(args[2],ctx)), FTnbits(try_to_determine_bitstype_nbits(args[1],ctx)));
+    HANDLE(sitofp,2) { Value *val = builder.CreateSIToFP(JL_INT(auto_unbox(args[2],ctx)), FTnbits(try_to_determine_bitstype_nbits(args[1],ctx))); if (in_j2c) j2c_sitofp(ast_node, args[1], args[2], ctx, TC_INT); return val; }
+    HANDLE(fptrunc,2) {Value *val = builder.CreateFPTrunc(FP(auto_unbox(args[2],ctx)), FTnbits(try_to_determine_bitstype_nbits(args[1],ctx))); if (in_j2c) j2c_fptrunc(ast_node, args[1], args[2], ctx, TC_FP); return val; }
+    HANDLE(fpext,2) {         
         // when extending a float32 to a float64, we need to force
         // rounding to single precision first. the reason is that it's
         // fine to keep working in extended precision as long as it's
@@ -806,8 +809,10 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
         // rounding first instead of carrying around incorrect low bits.
         Value *x = auto_unbox(args[2],ctx);
         builder.CreateStore(FP(x), builder.CreateBitCast(prepare_global(jlfloattemp_var),FT(x->getType())->getPointerTo()), true);
-        return builder.CreateFPExt(builder.CreateLoad(builder.CreateBitCast(prepare_global(jlfloattemp_var),FT(x->getType())->getPointerTo()), true),
+        Value * val = builder.CreateFPExt(builder.CreateLoad(builder.CreateBitCast(jlfloattemp_var,FT(x->getType())->getPointerTo()), true),
                                    FTnbits(try_to_determine_bitstype_nbits(args[1],ctx)));
+        if (in_j2c) j2c_fpext(ast_node, args[1], args[2], ctx, TC_FP);                           
+        return val;                           
     }
     HANDLE(select_value,3) {
         Value *isfalse = emit_condition(args[1], "select_value", ctx);
@@ -838,6 +843,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
                                                  boxed(emit_expr(args[2],ctx,false), ctx, expr_type(args[2],ctx)));
         }
         ctx->argDepth = argStart;
+        if (in_j2c) j2c_select_value(ast_node, args[1], args[2], args[3], ctx);
         return ifelse_result;
     }
     default: ;
@@ -857,11 +863,12 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
     Value *den;
     Value *typemin;
     switch (f) {
-    HANDLE(neg_int,1) return builder.CreateSub(ConstantInt::get(t, 0), JL_INT(x));
-    HANDLE(add_int,2) return builder.CreateAdd(JL_INT(x), JL_INT(y));
-    HANDLE(sub_int,2) return builder.CreateSub(JL_INT(x), JL_INT(y));
-    HANDLE(mul_int,2) return builder.CreateMul(JL_INT(x), JL_INT(y));
-    HANDLE(sdiv_int,2)
+    HANDLE(neg_int,1) { Value *val = builder.CreateSub(ConstantInt::get(t, 0), JL_INT(x)); if (in_j2c) j2c_unary_scalar_op(ast_node, "-", args[1], ctx, TC_INT); return val; }
+    HANDLE(add_int,2) { Value *val = builder.CreateAdd(JL_INT(x), JL_INT(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "+", args[2], ctx, TC_INT); return val; } 
+    HANDLE(sub_int,2) { Value *val = builder.CreateSub(JL_INT(x), JL_INT(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "-", args[2], ctx, TC_INT); return val; }
+    HANDLE(mul_int,2) { Value *val = builder.CreateMul(JL_INT(x), JL_INT(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "*", args[2], ctx, TC_INT); return val; }
+    HANDLE(sdiv_int,2)        
+        J2C_UNIMPL_INTRINSIC(f); 
         den = JL_INT(y);
         t = den->getType();
         x = JL_INT(x);
@@ -880,6 +887,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
 
         return builder.CreateSDiv(x, den);
     HANDLE(udiv_int,2)
+        J2C_UNIMPL_INTRINSIC(f); 
         den = JL_INT(y);
         t = den->getType();
         raise_exception_unless(builder.CreateICmpNE(den, ConstantInt::get(t,0)),
@@ -887,9 +895,11 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
         return builder.CreateUDiv(JL_INT(x), den);
 
     HANDLE(srem_int,2)
+        J2C_UNIMPL_INTRINSIC(f); 
         return emit_srem(JL_INT(x), JL_INT(y), ctx);
 
     HANDLE(urem_int,2)
+        J2C_UNIMPL_INTRINSIC(f); 
         den = JL_INT(y);
         t = den->getType();
         raise_exception_unless(builder.CreateICmpNE(den, ConstantInt::get(t,0)),
@@ -897,14 +907,15 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
         return builder.CreateURem(JL_INT(x), den);
 
     HANDLE(smod_int,2)
+        J2C_UNIMPL_INTRINSIC(f); 
         return emit_smod(JL_INT(x), JL_INT(y), ctx);
 
-    HANDLE(neg_float,1) return builder.CreateFMul(ConstantFP::get(FT(t), -1.0), FP(x));
-    HANDLE(add_float,2) return builder.CreateFAdd(FP(x), FP(y));
-    HANDLE(sub_float,2) return builder.CreateFSub(FP(x), FP(y));
-    HANDLE(mul_float,2) return builder.CreateFMul(FP(x), FP(y));
-    HANDLE(div_float,2) return builder.CreateFDiv(FP(x), FP(y));
-    HANDLE(rem_float,2) return builder.CreateFRem(FP(x), FP(y));
+    HANDLE(neg_float,1) { Value *val = builder.CreateFMul(ConstantFP::get(FT(t), -1.0), FP(x)); if (in_j2c) j2c_unary_scalar_op(ast_node, "-", args[1], ctx, TC_FP); return val; }
+    HANDLE(add_float,2) { Value *val = builder.CreateFAdd(FP(x), FP(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "+", args[2], ctx, TC_FP); return val; }
+    HANDLE(sub_float,2) { Value *val = builder.CreateFSub(FP(x), FP(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "-", args[2], ctx, TC_FP); return val; }
+    HANDLE(mul_float,2) { Value *val = builder.CreateFMul(FP(x), FP(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "*", args[2], ctx, TC_FP); return val; }
+    HANDLE(div_float,2) { Value *val = builder.CreateFDiv(FP(x), FP(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "/", args[2], ctx, TC_FP); return val; }
+    HANDLE(rem_float,2) { Value *val = builder.CreateFRem(FP(x), FP(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "%", args[2], ctx, TC_FP); return val; }
 
     HANDLE(checked_sadd,2)
     HANDLE(checked_uadd,2)
@@ -931,24 +942,35 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
              ix, iy);
         Value *obit = builder.CreateExtractValue(res, ArrayRef<unsigned>(1));
         raise_exception_if(obit, prepare_global(jlovferr_var), ctx);
-        return builder.CreateExtractValue(res, ArrayRef<unsigned>(0));
+        Value *val = builder.CreateExtractValue(res, ArrayRef<unsigned>(0));
+        if (in_j2c) {
+            const char * intrinsic_name = (f==checked_sadd) ? "checked_sadd" : 
+                                    (f==checked_uadd) ? "checked_uadd" : 
+                                    (f==checked_ssub) ? "checked_ssub" : 
+                                    (f==checked_usub) ? "checked_usub" : 
+                                    (f==checked_smul) ? "checked_smul" : "checked_umul";
+            j2c_checked_add_sub_mul(intrinsic_name, ast_node, args[1], args[2], ctx);         
+        }
+        return val;
     }
 
-    HANDLE(eq_int,2)  return builder.CreateICmpEQ(JL_INT(x), JL_INT(y));
-    HANDLE(ne_int,2)  return builder.CreateICmpNE(JL_INT(x), JL_INT(y));
-    HANDLE(slt_int,2) return builder.CreateICmpSLT(JL_INT(x), JL_INT(y));
-    HANDLE(ult_int,2) return builder.CreateICmpULT(JL_INT(x), JL_INT(y));
-    HANDLE(sle_int,2) return builder.CreateICmpSLE(JL_INT(x), JL_INT(y));
-    HANDLE(ule_int,2) return builder.CreateICmpULE(JL_INT(x), JL_INT(y));
+    // TODO: check if we need to generate different statements for signed and unsigned same op
+    HANDLE(eq_int,2)  { Value *val = builder.CreateICmpEQ(JL_INT(x), JL_INT(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "==", args[2], ctx, TC_INT); return val; }
+    HANDLE(ne_int,2)  { Value *val = builder.CreateICmpNE(JL_INT(x), JL_INT(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "!=", args[2], ctx, TC_INT); return val; }
+    HANDLE(slt_int,2) { Value *val = builder.CreateICmpSLT(JL_INT(x), JL_INT(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "<", args[2], ctx, TC_INT); return val; }
+    HANDLE(ult_int,2) { Value *val = builder.CreateICmpULT(JL_INT(x), JL_INT(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "<", args[2], ctx, TC_INT); return val; }
+    HANDLE(sle_int,2) { Value *val = builder.CreateICmpSLE(JL_INT(x), JL_INT(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "<=", args[2], ctx, TC_INT); return val; }
+    HANDLE(ule_int,2) { Value *val = builder.CreateICmpULE(JL_INT(x), JL_INT(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "<=", args[2], ctx, TC_INT); return val; }
 
-    HANDLE(eq_float,2) return builder.CreateFCmpOEQ(FP(x), FP(y));
-    HANDLE(ne_float,2) return builder.CreateFCmpUNE(FP(x), FP(y));
-    HANDLE(lt_float,2) return builder.CreateFCmpOLT(FP(x), FP(y));
-    HANDLE(le_float,2) return builder.CreateFCmpOLE(FP(x), FP(y));
+    HANDLE(eq_float,2) { Value *val = builder.CreateFCmpOEQ(FP(x), FP(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "==", args[2], ctx, TC_FP); return val; }
+    HANDLE(ne_float,2) { Value *val = builder.CreateFCmpUNE(FP(x), FP(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "==", args[2], ctx, TC_FP); return val; }
+    HANDLE(lt_float,2) { Value *val = builder.CreateFCmpOLT(FP(x), FP(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "<", args[2], ctx, TC_FP); return val; }
+    HANDLE(le_float,2) { Value *val = builder.CreateFCmpOLE(FP(x), FP(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "<=", args[2], ctx, TC_FP); return val; }
 
-    HANDLE(eqfsi64,2) return emit_eqfsi64(x, y);
-    HANDLE(eqfui64,2) return emit_eqfui64(x, y);
+    HANDLE(eqfsi64,2) J2C_UNIMPL_INTRINSIC(f); return emit_eqfsi64(x, y);
+    HANDLE(eqfui64,2) J2C_UNIMPL_INTRINSIC(f); return emit_eqfui64(x, y);
     HANDLE(ltfsi64,2) {
+        J2C_UNIMPL_INTRINSIC(f); 
         x = FP(x);
         fy = JL_INT(y);
         Value *ffy = builder.CreateSIToFP(fy, T_float64);
@@ -965,6 +987,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
         );
     }
     HANDLE(ltfui64,2) {
+        J2C_UNIMPL_INTRINSIC(f); 
         x = FP(x);
         fy = JL_INT(y);
         Value *ffy = builder.CreateUIToFP(fy, T_float64);
@@ -981,6 +1004,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
         );
     }
     HANDLE(lefsi64,2) {
+        J2C_UNIMPL_INTRINSIC(f); 
         x = FP(x);
         fy = JL_INT(y);
         Value *ffy = builder.CreateSIToFP(fy, T_float64);
@@ -997,6 +1021,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
         );
     }
     HANDLE(lefui64,2) {
+        J2C_UNIMPL_INTRINSIC(f); 
         x = FP(x);
         fy = JL_INT(y);
         Value *ffy = builder.CreateUIToFP(fy, T_float64);
@@ -1013,6 +1038,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
         );
     }
     HANDLE(ltsif64,2) {
+        J2C_UNIMPL_INTRINSIC(f); 
         x = JL_INT(x);
         fy = FP(y);
         Value *fx = builder.CreateSIToFP(x, T_float64);
@@ -1028,6 +1054,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
                );
     }
     HANDLE(ltuif64,2) {
+        J2C_UNIMPL_INTRINSIC(f); 
         x = JL_INT(x);
         fy = FP(y);
         Value *fx = builder.CreateUIToFP(x, T_float64);
@@ -1043,6 +1070,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
                );
     }
     HANDLE(lesif64,2) {
+        J2C_UNIMPL_INTRINSIC(f); 
         x = JL_INT(x);
         fy = FP(y);
         Value *fx = builder.CreateSIToFP(x, T_float64);
@@ -1058,6 +1086,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
                );
     }
     HANDLE(leuif64,2) {
+        J2C_UNIMPL_INTRINSIC(f); 
         x = JL_INT(x);
         fy = FP(y);
         Value *fx = builder.CreateUIToFP(x, T_float64);
@@ -1074,6 +1103,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
     }
 
     HANDLE(fpiseq,2) {
+        J2C_UNIMPL_INTRINSIC(f); 
         Value *xi = JL_INT(x);
         Value *yi = JL_INT(y);
         x = FP(x);
@@ -1084,6 +1114,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
     }
 
     HANDLE(fpislt,2) {
+        J2C_UNIMPL_INTRINSIC(f); 
         Value *xi = JL_INT(x);
         Value *yi = JL_INT(y);
         x = FP(x);
@@ -1109,11 +1140,12 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
         );
     }
 
-    HANDLE(and_int,2) return builder.CreateAnd(JL_INT(x), JL_INT(y));
-    HANDLE(or_int,2)  return builder.CreateOr(JL_INT(x), JL_INT(y));
-    HANDLE(xor_int,2) return builder.CreateXor(JL_INT(x), JL_INT(y));
-    HANDLE(not_int,1) return builder.CreateXor(JL_INT(x), ConstantInt::get(t, -1, true));
+    HANDLE(and_int,2) { Value *val = builder.CreateAnd(JL_INT(x), JL_INT(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "&", args[2], ctx, TC_INT); return val; }
+    HANDLE(or_int,2)  { Value *val = builder.CreateOr(JL_INT(x), JL_INT(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "|", args[2], ctx, TC_INT); return val; }
+    HANDLE(xor_int,2) { Value *val = builder.CreateXor(JL_INT(x), JL_INT(y)); if (in_j2c) j2c_binary_scalar_op(ast_node, args[1], "^", args[2], ctx, TC_INT); return val; }
+    HANDLE(not_int,1) { Value *val = builder.CreateXor(JL_INT(x), ConstantInt::get(t, -1, true)); if (in_j2c) j2c_unary_scalar_op(ast_node, "not_int", args[1], ctx, TC_INT); return val; }
     HANDLE(shl_int,2)
+        J2C_UNIMPL_INTRINSIC(f); 
         x = JL_INT(x); y = JL_INT(y);
         return builder.
             CreateSelect(builder.
@@ -1122,6 +1154,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
                          ConstantInt::get(x->getType(),0),
                          builder.CreateShl(x, uint_cnvt(t,y)));
     HANDLE(lshr_int,2)
+        J2C_UNIMPL_INTRINSIC(f); 
         x = JL_INT(x); y = JL_INT(y);
         return builder.
             CreateSelect(builder.
@@ -1130,6 +1163,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
                          ConstantInt::get(x->getType(),0),
                          builder.CreateLShr(x, uint_cnvt(t,y)));
     HANDLE(ashr_int,2)
+        J2C_UNIMPL_INTRINSIC(f); 
         x = JL_INT(x); y = JL_INT(y);
         return builder.
             CreateSelect(builder.
@@ -1139,28 +1173,33 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
                                                                 x->getType()->getPrimitiveSizeInBits()-1)),
                          builder.CreateAShr(x, uint_cnvt(t,y)));
     HANDLE(bswap_int,1)
+        J2C_UNIMPL_INTRINSIC(f); 
         x = JL_INT(x);
         return builder.CreateCall(
             Intrinsic::getDeclaration(jl_Module, Intrinsic::bswap,
                                       ArrayRef<Type*>(x->getType())), x);
     HANDLE(ctpop_int,1)
+        J2C_UNIMPL_INTRINSIC(f); 
         x = JL_INT(x);
         return builder.CreateCall(
             Intrinsic::getDeclaration(jl_Module, Intrinsic::ctpop,
                                       ArrayRef<Type*>(x->getType())), x);
 #if !defined(LLVM_VERSION_MAJOR) || (LLVM_VERSION_MAJOR == 3 && LLVM_VERSION_MINOR == 0)
     HANDLE(ctlz_int,1)
+        J2C_UNIMPL_INTRINSIC(f); 
         x = JL_INT(x);
         return builder.CreateCall(
             Intrinsic::getDeclaration(jl_Module, Intrinsic::ctlz,
                                       ArrayRef<Type*>(x->getType())), x);
     HANDLE(cttz_int,1)
+        J2C_UNIMPL_INTRINSIC(f); 
         x = JL_INT(x);
         return builder.CreateCall(
             Intrinsic::getDeclaration(jl_Module, Intrinsic::cttz,
                                       ArrayRef<Type*>(x->getType())), x);
 #elif LLVM_VERSION_MAJOR==3 && LLVM_VERSION_MINOR >= 1
     HANDLE(ctlz_int,1) {
+        J2C_UNIMPL_INTRINSIC(f); 
         x = JL_INT(x);
         Type *types[1] = {x->getType()};
         return builder.CreateCall2(
@@ -1168,6 +1207,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
                                       ArrayRef<Type*>(types)), x, ConstantInt::get(T_int1,0));
     }
     HANDLE(cttz_int,1) {
+        J2C_UNIMPL_INTRINSIC(f); 
         x = JL_INT(x);
         Type *types[1] = {x->getType()};
         return builder.CreateCall2(
@@ -1175,24 +1215,27 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
     }
 #endif
 
-    HANDLE(fptoui,1) return builder.CreateFPToUI(FP(x), JL_INTT(x->getType()));
-    HANDLE(fptosi,1) return builder.CreateFPToSI(FP(x), JL_INTT(x->getType()));
+    HANDLE(fptoui,1) J2C_UNIMPL_INTRINSIC(f); return builder.CreateFPToUI(FP(x), JL_INTT(x->getType()));
+    HANDLE(fptosi,1) J2C_UNIMPL_INTRINSIC(f); return builder.CreateFPToSI(FP(x), JL_INTT(x->getType()));
     HANDLE(fpsiround,1)
     HANDLE(fpuiround,1)
     {
+        J2C_UNIMPL_INTRINSIC(f); 
         return emit_iround(x, f == fpsiround, ctx);
     }
-    HANDLE(nan_dom_err,2) {
+    HANDLE(nan_dom_err,2) {                
         // nan_dom_err(f, x) throw DomainError if isnan(f)&&!isnan(x)
         Value *f = FP(x); x = FP(y);
         raise_exception_unless(builder.CreateOr(builder.CreateFCmpORD(f,f),
                                                 builder.CreateFCmpUNO(x,x)),
                                prepare_global(jldomerr_var), ctx);
+        if (in_j2c) j2c_nan_dom_err(ast_node, args[1], args[2], ctx);                               
         return f;
     }
 
     HANDLE(abs_float,1)
     {
+        J2C_UNIMPL_INTRINSIC(f); 
         x = FP(x);
         Type *intt = JL_INTT(x->getType());
         Value *bits = builder.CreateBitCast(FP(x), intt);
@@ -1203,6 +1246,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
     }
     HANDLE(copysign_float,2)
     {
+        J2C_UNIMPL_INTRINSIC(f); 
         x = FP(x);
         fy = FP(y);
         Type *intt = JL_INTT(x->getType());
@@ -1222,6 +1266,7 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
     }
     HANDLE(flipsign_int,2)
     {
+        J2C_UNIMPL_INTRINSIC(f); 
         x = JL_INT(x);
         fy = JL_INT(y);
         Type *intt = x->getType();
@@ -1240,15 +1285,18 @@ static Value *emit_intrinsic(intrinsic f, jl_value_t **args, size_t nargs,
         return builder.CreateXor(builder.CreateAdd(x,tmp),tmp);
     }
     HANDLE(jl_alloca,1) {
+        J2C_UNIMPL_INTRINSIC(f); 
         return builder.CreateAlloca(IntegerType::get(jl_LLVMContext, 8),JL_INT(x));
     }
     HANDLE(sqrt_llvm,1) {
         x = FP(x);
         raise_exception_unless(builder.CreateFCmpUGE(x, ConstantFP::get(x->getType(),0.0)),
                                prepare_global(jldomerr_var), ctx);
-        return builder.CreateCall(Intrinsic::getDeclaration(jl_Module, Intrinsic::sqrt,
+        Value *val = builder.CreateCall(Intrinsic::getDeclaration(jl_Module, Intrinsic::sqrt,
                                                             ArrayRef<Type*>(x->getType())),
                                   x);
+        if (in_j2c) j2c_unary_scalar_op(ast_node, "sqrt", args[1], ctx, TC_FP);
+        return val;
     }
     HANDLE(powi_llvm,2) {
         x = FP(x);

@@ -40,6 +40,8 @@ JL_CALLABLE(jl_f_applicable);
 JL_CALLABLE(jl_f_invoke);
 JL_CALLABLE(jl_f_task);
 JL_CALLABLE(jl_f_yieldto);
+JL_CALLABLE(jl_f_unsafe_arrayref);
+JL_CALLABLE(jl_f_unsafe_arrayset);
 
 #ifdef __cplusplus
 }

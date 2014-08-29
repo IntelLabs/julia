@@ -983,6 +983,9 @@ void jl_init_primitives(void)
 
     add_builtin_func("apply_type", jl_f_instantiate_type);
 
+    add_builtin_func("unsafe_arrayref", jl_f_unsafe_arrayref);
+    add_builtin_func("unsafe_arrayset", jl_f_unsafe_arrayset);
+
     // builtin types
     add_builtin("Any", (jl_value_t*)jl_any_type);
     add_builtin("None", (jl_value_t*)jl_bottom_type);

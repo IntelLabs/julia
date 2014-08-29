@@ -1,6 +1,6 @@
 # important core definitions
 
-using Core: Intrinsics, arraylen, arrayref, arrayset, arraysize,
+using Core: Intrinsics, arraylen, arrayref, arrayset, unsafe_arrayref, unsafe_arrayset, arraysize,
             tuplelen, tupleref, convert_default, kwcall,
             typeassert, apply_type
 

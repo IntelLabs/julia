@@ -1,5 +1,6 @@
 {
   global:
+    set_j2c_verbose;
     alloc_*w;
     allocobj;
     asprintf;

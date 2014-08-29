@@ -457,6 +457,15 @@ JL_CALLABLE(jl_f_arrayref)
     return jl_arrayref(a, i);
 }
 
+JL_CALLABLE(jl_f_unsafe_arrayref)
+{
+    JL_NARGSV(unsafe_arrayref, 2);
+    JL_TYPECHK(unsafe_arrayref, array, args[0]);
+    jl_array_t *a = (jl_array_t*)args[0];
+    size_t i = array_nd_index(a, &args[1], nargs-1, "unsafe_arrayref");
+    return jl_arrayref(a, i);
+}
+
 int jl_array_isdefined(jl_value_t **args0, int nargs)
 {
     assert(jl_is_array(args0[0]));
@@ -507,6 +516,16 @@ JL_CALLABLE(jl_f_arrayset)
     JL_TYPECHK(arrayset, array, args[0]);
     jl_array_t *a = (jl_array_t*)args[0];
     size_t i = array_nd_index(a, &args[2], nargs-2, "arrayset");
+    jl_arrayset(a, args[1], i);
+    return args[0];
+}
+
+JL_CALLABLE(jl_f_unsafe_arrayset)
+{
+    JL_NARGSV(unsafe_arrayset, 3);
+    JL_TYPECHK(unsafe_arrayset, array, args[0]);
+    jl_array_t *a = (jl_array_t*)args[0];
+    size_t i = array_nd_index(a, &args[2], nargs-2, "unsafe_arrayset");
     jl_arrayset(a, args[1], i);
     return args[0];
 }

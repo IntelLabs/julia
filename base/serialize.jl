@@ -31,6 +31,7 @@ let i = 2
              :mul_float, :unbox, :box,
              :eq_int, :slt_int, :sle_int, :ne_int,
              :arrayset, :arrayref,
+             :unsafe_arrayset, :unsafe_arrayref,
              :reserved13, :reserved14, :reserved15, :reserved16,
              :reserved17, :reserved18, :reserved19, :reserved20,
              false, true, nothing, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
@@ -225,6 +226,7 @@ function serialize(s, linfo::LambdaStaticData)
         serialize(s, {})
     end
     serialize(s, linfo.sparams)
+    serialize(s, linfo.j2cflag)
     serialize(s, linfo.inferred)
     serialize(s, linfo.module)
     if isdefined(linfo, :capt)
@@ -370,6 +372,7 @@ function deserialize(s, ::Type{LambdaStaticData})
     ast = deserialize(s)
     roots = deserialize(s)
     sparams = deserialize(s)
+    j2cflag = deserialize(s)
     infr = deserialize(s)
     mod = deserialize(s)
     capt = deserialize(s)
@@ -377,6 +380,7 @@ function deserialize(s, ::Type{LambdaStaticData})
         return known_lambda_data[lnumber]
     else
         linfo = ccall(:jl_new_lambda_info, Any, (Any, Any), ast, sparams)
+        linfo.j2cflag = j2cflag
         linfo.inferred = infr
         linfo.module = mod
         linfo.roots = roots

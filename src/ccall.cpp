@@ -570,9 +570,13 @@ static Value *emit_cglobal(jl_value_t **args, size_t nargs, jl_codectx_t *ctx)
 
 // --- code generator for ccall itself ---
 
+// In calling to j2c_*, we always do that after the original emit_* is done, so that the children
+// ast nodes have been processed, and thus we may do something like size inference.    
+#define END_EMIT_CCALL { if(in_j2c) j2c_ccall(f_name, f_lib, jl_ptr, fptr, args, nargs, ctx, ast_node); }
+
 // ccall(pointer, rettype, (argtypes...), args...)
-static Value *emit_ccall(jl_value_t **args, size_t nargs, jl_codectx_t *ctx)
-{
+static Value *emit_ccall(jl_value_t **args, size_t nargs, jl_codectx_t *ctx, jl_value_t* ast_node)
+{    
     JL_NARGSV(ccall, 3);
     jl_value_t *rt=NULL, *at=NULL;
     JL_GC_PUSH2(&rt, &at);
@@ -735,7 +739,9 @@ static Value *emit_ccall(jl_value_t **args, size_t nargs, jl_codectx_t *ctx)
         assert(lrt->isPointerTy());
         Value *ary = emit_expr(args[4], ctx);
         JL_GC_POP();
-        return mark_julia_type(builder.CreateBitCast(emit_arrayptr(ary),lrt), rt);
+        Value *return_val = mark_julia_type(builder.CreateBitCast(emit_arrayptr(ary),lrt), rt);
+        if (in_j2c) j2c_array_ptr(ast_node, args, ctx);
+        return return_val;
     }
     if (fptr == &jl_value_ptr ||
         (f_lib==NULL && f_name && !strcmp(f_name,"jl_value_ptr"))) {
@@ -748,9 +754,11 @@ static Value *emit_ccall(jl_value_t **args, size_t nargs, jl_codectx_t *ctx)
         }
         Value *ary = boxed(emit_expr(argi, ctx),ctx);
         JL_GC_POP();
-        return mark_julia_type(
+        Value *return_val = mark_julia_type(
                 builder.CreateBitCast(emit_nthptr_addr(ary, addressOf?1:0), lrt),
                 rt);
+        J2C_UNIMPL("emit ccall: jl_value_ptr");
+        return return_val;
     }
 
     // save place before arguments, for possible insertion of temp arg
@@ -877,12 +885,14 @@ static Value *emit_ccall(jl_value_t **args, size_t nargs, jl_codectx_t *ctx)
         null_pointer_check(jl_ptr,ctx);
         Type *funcptype = PointerType::get(functype,0);
         llvmf = builder.CreateIntToPtr(jl_ptr, funcptype);
+        J2C_UNIMPL("emit ccall: jl ptr");
     }
     else if (fptr != NULL) {
         Type *funcptype = PointerType::get(functype,0);
         llvmf = literal_static_pointer_val(fptr, funcptype);
         if (imaging_mode)
             JL_PRINTF(JL_STDERR,"warning: literal address used in ccall for %s; code cannot be statically compiled\n", f_name);
+        J2C_UNIMPL("emit ccall: literal address");
     }
     else {
         assert(f_name != NULL);
@@ -979,8 +989,11 @@ static Value *emit_ccall(jl_value_t **args, size_t nargs, jl_codectx_t *ctx)
     }
 
     JL_GC_POP();
-    if (!sret && lrt == T_void)
-        return literal_pointer_val((jl_value_t*)jl_nothing);
+    if (!sret && lrt == T_void) {
+        Value *return_val = literal_pointer_val((jl_value_t*)jl_nothing);
+        J2C_UNIMPL("emit ccall: jl_nothing");
+        return return_val;
+    }
     if (lrt->isStructTy()) {
         //fprintf(stderr, "ccall rt: %s -> %s\n", f_name, ((jl_tag_type_t*)rt)->name->name->name);
         assert(jl_is_structtype(rt));
@@ -994,7 +1007,11 @@ static Value *emit_ccall(jl_value_t **args, size_t nargs, jl_codectx_t *ctx)
                             builder.CreateBitCast(
                                 emit_nthptr_addr(strct, (size_t)1),
                                 PointerType::get(lrt,0)));
-        return mark_julia_type(strct, rt);
+        Value *return_val = mark_julia_type(strct, rt);
+        J2C_UNIMPL("emit ccall: structTy");
+        return return_val;
     }
-    return mark_julia_type(result, rt);
+    Value *return_val = mark_julia_type(result, rt);
+    END_EMIT_CCALL
+    return return_val;
 }

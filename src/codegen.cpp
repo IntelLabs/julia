@@ -111,6 +111,8 @@
 #include <set>
 #include <cstdio>
 #include <cassert>
+#include <fstream>
+#include <iostream>
 using namespace llvm;
 
 extern "C" {
@@ -283,55 +285,7 @@ static Function *jlgetnthfieldchecked_func;
 static Function *resetstkoflw_func;
 #endif
 
-// --- code generation ---
-
-// per-local-variable information
-struct jl_varinfo_t {
-    Value *memvalue;  // an address, if the var is alloca'd
-    Value *SAvalue;   // register, if the var is SSA
-    Value *passedAs;  // if an argument, the original passed value
-    int closureidx;   // index in closure env, or -1
-    bool isAssigned;
-    bool isCaptured;
-    bool isSA;
-    bool isVolatile;
-    bool isArgument;
-    bool isGhost;     // Has size 0 and is thus never actually allocated
-    bool hasGCRoot;
-    bool escapes;
-    bool usedUndef;
-    bool used;
-    jl_value_t *declType;
-    jl_value_t *initExpr;  // initializing expression for SSA variables
-
-    jl_varinfo_t() : memvalue(NULL), SAvalue(NULL), passedAs(NULL), closureidx(-1),
-                     isAssigned(true), isCaptured(false), isSA(false), isVolatile(false),
-                     isArgument(false), isGhost(false), hasGCRoot(false), escapes(true), 
-                     usedUndef(false), used(false), 
-                     declType((jl_value_t*)jl_any_type), initExpr(NULL)
-    {
-    }
-};
-
-// --- helpers for reloading IR image
 static void jl_gen_llvm_gv_array();
-
-extern "C"
-void jl_dump_bitcode(char* fname)
-{
-    std::string err;
-#ifdef LLVM35
-    raw_fd_ostream OS(fname, err, sys::fs::F_None);
-#else
-    raw_fd_ostream OS(fname, err);
-#endif
-    jl_gen_llvm_gv_array();
-#ifdef USE_MCJIT
-    WriteBitcodeToFile(shadow_module, OS);
-#else
-    WriteBitcodeToFile(jl_Module, OS);
-#endif
-}
 
 extern "C"
 void jl_dump_objfile(char* fname, int jit_model)
@@ -381,65 +335,6 @@ void jl_dump_objfile(char* fname, int jit_model)
 #endif
 }
 
-// aggregate of array metadata
-typedef struct {
-    Value *dataptr;
-    Value *len;
-    std::vector<Value*> sizes;
-    jl_value_t *ty;
-} jl_arrayvar_t;
-
-// information about the context of a piece of code: its enclosing
-// function and module, and visible local variables and labels.
-typedef struct {
-    Function *f;
-    // local var info. globals are not in here.
-    // NOTE: you must be careful not to access vars[s] before you are sure "s" is
-    // a local, since otherwise this will add it to the map.
-    std::map<jl_sym_t*, jl_varinfo_t> vars;
-    std::map<jl_sym_t*, jl_arrayvar_t> *arrayvars;
-    std::map<int, BasicBlock*> *labels;
-    std::map<int, Value*> *handlers;
-    jl_module_t *module;
-    jl_expr_t *ast;
-    jl_tuple_t *sp;
-    jl_lambda_info_t *linfo;
-    Value *envArg;
-    Value *argArray;
-    Value *argCount;
-    Instruction *argTemp;
-    int argDepth;
-    int maxDepth;
-    int argSpaceOffs;
-    std::string funcName;
-    jl_sym_t *vaName;  // name of vararg argument
-    bool vaStack;      // varargs stack-allocated
-    int nReqArgs;
-    int lineno;
-    std::vector<bool> boundsCheck;
-#ifdef JL_GC_MARKSWEEP
-    Instruction *gcframe ;
-    Instruction *argSpaceInits;
-    StoreInst *storeFrameSize;
-#endif
-    BasicBlock::iterator first_gcframe_inst;
-    BasicBlock::iterator last_gcframe_inst;
-    llvm::DIBuilder *dbuilder;
-    std::vector<Instruction*> gc_frame_pops;
-    std::vector<CallInst*> to_inline;
-} jl_codectx_t;
-
-static Value *emit_expr(jl_value_t *expr, jl_codectx_t *ctx, bool boxed=true,
-                        bool valuepos=true);
-static Value *emit_unboxed(jl_value_t *e, jl_codectx_t *ctx);
-static int is_global(jl_sym_t *s, jl_codectx_t *ctx);
-static Value *make_gcroot(Value *v, jl_codectx_t *ctx);
-static Value *global_binding_pointer(jl_module_t *m, jl_sym_t *s,
-                                     jl_binding_t **pbnd, bool assign);
-static Value *emit_checked_var(Value *bp, jl_sym_t *name, jl_codectx_t *ctx);
-static bool might_need_root(jl_value_t *ex);
-static Value *emit_condition(jl_value_t *cond, const std::string &msg, jl_codectx_t *ctx);
-
 // NoopType
 static Type *NoopType;
 
@@ -456,8 +351,6 @@ const char *jl_cpu_string = "native";
 
     int globalUnique = 0;
 }
-
-#include "cgutils.cpp"
 
 static void jl_rethrow_with_add(const char *fmt, ...)
 {
@@ -659,6 +552,12 @@ static Function *jl_cfunction_object(jl_function_t *f, jl_value_t *rt, jl_value_
     return NULL;
 }
 
+int enable_j2c_verbose = 0; 
+extern "C" DLLEXPORT
+void set_j2c_verbose(int value) {
+    enable_j2c_verbose = value;
+}
+
 // get the address of a C-callable entry point for a function
 extern "C" DLLEXPORT
 void *jl_function_ptr(jl_function_t *f, jl_value_t *rt, jl_value_t *argt)
@@ -739,6 +638,148 @@ const jl_value_t *jl_dump_function(jl_function_t *f, jl_tuple_t *types, bool dum
     }
     return jl_dump_llvmf(llvmf,dumpasm);
 }
+
+// --- code generation ---
+
+// per-local-variable information
+struct jl_varinfo_t {
+    Value *memvalue;  // an address, if the var is alloca'd
+    Value *SAvalue;   // register, if the var is SSA
+    Value *passedAs;  // if an argument, the original passed value
+    int closureidx;   // index in closure env, or -1
+    bool isAssigned;
+    bool isCaptured;
+    bool isSA;
+    bool isVolatile;
+    bool isArgument;
+    bool isGhost;     // Has size 0 and is thus never actually allocated
+    bool hasGCRoot;
+    bool escapes;
+    bool usedUndef;
+    bool used;
+    jl_value_t *declType;
+    jl_value_t *initExpr;  // initializing expression for SSA variables
+
+    jl_varinfo_t() : memvalue(NULL), SAvalue(NULL), passedAs(NULL), closureidx(-1),
+                     isAssigned(true), isCaptured(false), isSA(false), isVolatile(false),
+                     isArgument(false), isGhost(false), hasGCRoot(false), escapes(true), 
+                     usedUndef(false), used(false), 
+                     declType((jl_value_t*)jl_any_type), initExpr(NULL)
+    {
+    }
+};
+
+// --- helpers for reloading IR image
+extern "C"
+void jl_set_imaging_mode(int stat)
+{
+    imaging_mode = !!stat;
+}
+
+extern "C"
+void jl_dump_bitcode(char* fname)
+{
+    std::string err;
+    raw_fd_ostream OS(fname, err);
+    jl_gen_llvm_gv_array();
+    WriteBitcodeToFile(jl_Module, OS);
+}
+
+// aggregate of array metadata
+typedef struct {
+    Value *dataptr;
+    Value *len;
+    std::vector<Value*> sizes;
+    jl_value_t *ty;
+} jl_arrayvar_t;
+
+#include "j2c.h"
+
+// information about the context of a piece of code: its enclosing
+// function and module, and visible local variables and labels.
+typedef struct {
+    Function *f;
+    // local var info. globals are not in here.
+    // NOTE: you must be careful not to access vars[s] before you are sure "s" is
+    // a local, since otherwise this will add it to the map.
+    std::map<jl_sym_t*, jl_varinfo_t> vars;
+    std::map<jl_sym_t*, jl_arrayvar_t> *arrayvars;
+    std::map<int, BasicBlock*> *labels;
+    std::map<int, Value*> *handlers;
+    jl_module_t *module;
+    jl_expr_t *ast;
+    jl_tuple_t *sp;
+    jl_lambda_info_t *linfo;
+    Value *envArg;
+    Value *argArray;
+    Value *argCount;
+    Instruction *argTemp;
+    int argDepth;
+    int maxDepth;
+    int argSpaceOffs;
+    std::string funcName;
+    jl_sym_t *vaName;  // name of vararg argument
+    bool vaStack;      // varargs stack-allocated
+    int nReqArgs;
+    int lineno;
+    std::vector<bool> boundsCheck;
+#ifdef JL_GC_MARKSWEEP
+    Instruction *gcframe ;
+    Instruction *argSpaceInits;
+    StoreInst *storeFrameSize;
+#endif
+    BasicBlock::iterator first_gcframe_inst;
+    BasicBlock::iterator last_gcframe_inst;
+    llvm::DIBuilder *dbuilder;
+    std::vector<Instruction*> gc_frame_pops;
+    std::vector<CallInst*> to_inline;
+
+    // Below is for j2c only    
+    std::map<jl_value_t*, ast_node_result_t*> ast_node_results;
+} jl_codectx_t;
+
+static Value *emit_expr(jl_value_t *expr, jl_codectx_t *ctx, bool boxed=true,
+                        bool valuepos=true);
+static Value *emit_unboxed(jl_value_t *e, jl_codectx_t *ctx);
+static int is_global(jl_sym_t *s, jl_codectx_t *ctx);
+static Value *make_gcroot(Value *v, jl_codectx_t *ctx);
+static Value *global_binding_pointer(jl_module_t *m, jl_sym_t *s,
+                                     jl_binding_t **pbnd, bool assign);
+static Value *emit_checked_var(Value *bp, jl_sym_t *name, jl_codectx_t *ctx);
+static bool might_need_root(jl_value_t *ex);
+static Value *emit_condition(jl_value_t *cond, const std::string &msg, jl_codectx_t *ctx);
+
+// --- utilities ---
+
+#include "cgutils.cpp"
+#include "j2c.cpp"
+
+class print_in_out {
+protected:
+    char *str;
+    int count;
+    jl_value_t *expr;
+public:
+    print_in_out(char *s, int &c, jl_value_t *e) : str(s), expr(e) {
+      if (enable_j2c_verbose) {
+        if (in_j2c) {
+            c++;
+            count = c;
+            JL_PRINTF(JL_STDOUT, "%s %d\n", str, count);
+            jl_static_show(JL_STDOUT, expr);
+            JL_PRINTF(JL_STDOUT, "\n\n");
+        }
+      }
+    }
+
+    ~print_in_out() {
+      if (enable_j2c_verbose) {
+        if (in_j2c) {
+            JL_PRINTF(JL_STDOUT, "Finished %s %d\n", str, count);
+        }
+      }
+    }
+};
 
 // --- code gen for intrinsic functions ---
 
@@ -1252,15 +1293,17 @@ static jl_tuple_t *call_arg_types(jl_value_t **args, size_t n, jl_codectx_t *ctx
     return t;
 }
 
-static Value *emit_getfield(jl_value_t *expr, jl_sym_t *name, jl_codectx_t *ctx)
+static Value *emit_getfield(jl_value_t *expr, jl_sym_t *name, jl_codectx_t *ctx, jl_value_t *ast_node)
 {
     if (jl_is_quotenode(expr) && jl_is_module(jl_fieldref(expr,0)))
         expr = jl_fieldref(expr,0);
 
     if (jl_is_module(expr)) {
+        jl_binding_t *bnd;
         Value *bp =
-            global_binding_pointer((jl_module_t*)expr, name, NULL, false);
+            global_binding_pointer((jl_module_t*)expr, name, &bnd, false);
         // todo: use type info to avoid undef check
+        if (in_j2c) j2c_getfield(expr, &bnd, ctx, ast_node);
         return emit_checked_var(bp, name, ctx);
     }
 
@@ -1274,6 +1317,7 @@ static Value *emit_getfield(jl_value_t *expr, jl_sym_t *name, jl_codectx_t *ctx)
             jl_value_t *jfty = jl_tupleref(sty->types, idx);
             Value *strct = emit_expr(expr, ctx, false);
             if (strct->getType() == jl_pvalue_llvmt) {
+                J2C_UNIMPL("emit_getfield: llvmt");
                 Value *addr =
                     builder.CreateGEP(builder.CreateBitCast(strct, T_pint8),
                                       ConstantInt::get(T_size,
@@ -1298,6 +1342,7 @@ static Value *emit_getfield(jl_value_t *expr, jl_sym_t *name, jl_codectx_t *ctx)
                     null_pointer_check(fldv, ctx);
                 }
                 JL_GC_POP();
+                if(in_j2c) j2c_getfield(expr, name, ctx, ast_node);
                 return mark_julia_type(fldv, jfty);
             }
         }
@@ -1305,6 +1350,7 @@ static Value *emit_getfield(jl_value_t *expr, jl_sym_t *name, jl_codectx_t *ctx)
     // TODO: attempt better codegen for approximate types, if the types
     // and offsets of some fields are independent of parameters.
     JL_GC_POP();
+    J2C_UNIMPL("emit_getfield: better code gen");
 
     int argStart = ctx->argDepth;
     Value *arg1 = boxed(emit_expr(expr, ctx),ctx,expr_type(expr,ctx));
@@ -1347,12 +1393,13 @@ static void emit_setfield(jl_datatype_t *sty, Value *strct, size_t idx,
 // and varg1 and varg2 are LLVM values for the arguments if we have them.
 static Value *emit_f_is(jl_value_t *rt1, jl_value_t *rt2,
                         jl_value_t *arg1, jl_value_t *arg2,
-                        Value *varg1, Value *varg2, jl_codectx_t *ctx)
+                        Value *varg1, Value *varg2, jl_codectx_t *ctx, jl_value_t* ast_node)
 {
     if (jl_is_type_type(rt1) && jl_is_type_type(rt2) &&
         !jl_is_typevar(jl_tparam0(rt1)) && !jl_is_typevar(jl_tparam0(rt2)) &&
         (!arg1 || is_constant(arg1, ctx)) &&
         (!arg2 || is_constant(arg2, ctx))) {
+        J2C_UNIMPL("emit known call: jl_f_is constant");        
         if (jl_tparam0(rt1) == jl_tparam0(rt2))
             return ConstantInt::get(T_int1, 1);
         return ConstantInt::get(T_int1, 0);
@@ -1377,6 +1424,7 @@ static Value *emit_f_is(jl_value_t *rt1, jl_value_t *rt2,
         varg2 = isbits ? auto_unbox(arg2, ctx) : emit_expr(arg2, ctx);
     if (isleaf && !isteq && !jl_is_type_type(rt1) && !jl_is_type_type(rt2)) {
         ctx->argDepth = last_depth;
+        J2C_UNIMPL("emit known call: jl_f_is const leaf");        
         return ConstantInt::get(T_int1, 0);
     }
     Type *at1 = varg1->getType();
@@ -1386,8 +1434,10 @@ static Value *emit_f_is(jl_value_t *rt1, jl_value_t *rt2,
             if (at1->isIntegerTy() || at1->isPointerTy() ||
                 at1->isFloatingPointTy()) {
                 answer = builder.CreateICmpEQ(JL_INT(varg1),JL_INT(varg2));
+                if (in_j2c) j2c_is(arg1, arg2, ctx, ast_node);                
                 goto done;
             }
+            J2C_UNIMPL("emit known call: jl_f_is struct");
             if (at1->isStructTy() && !ptr_comparable) {
                 // TODO: tuples
                 jl_datatype_t *sty = (jl_datatype_t*)rt1;
@@ -1399,13 +1449,14 @@ static Value *emit_f_is(jl_value_t *rt1, jl_value_t *rt2,
                         emit_f_is(fldty, fldty, NULL, NULL,
                                   builder.CreateExtractValue(varg1, ArrayRef<unsigned>(&i,1)),
                                   builder.CreateExtractValue(varg2, ArrayRef<unsigned>(&i,1)),
-                                  ctx);
+                                  ctx, ast_node);
                     answer = builder.CreateAnd(answer, subAns);
                 }
                 goto done;
             }
         }
     }
+    J2C_UNIMPL("emit known call: jl_f_is boxed");
     varg1 = boxed(varg1,ctx); varg2 = boxed(varg2,ctx);
     if (ptr_comparable)
         answer = builder.CreateICmpEQ(varg1, varg2);
@@ -1421,9 +1472,29 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                               Value **theFptr, jl_function_t **theF,
                               jl_value_t *expr)
 {
+#ifdef J2C_VERBOSE
+    static int count=0;
+    print_in_out pio("**** emit known_call ", count, expr);
+
+#if 0
+    if (enable_j2c_verbose) {
+    if (in_j2c) 
+    {
+        static int count=0;
+        count++;
+        JL_PRINTF(JL_STDOUT, "**** emit_known_call %d function is\n", count);
+        jl_static_show(JL_STDOUT, ff);
+        JL_PRINTF(JL_STDOUT, "  expr is\n");
+        jl_static_show(JL_STDOUT, expr);
+        JL_PRINTF(JL_STDOUT, "\n\n");
+    }
+    }
+#endif
+#endif
+    
     if (jl_typeis(ff, jl_intrinsic_type)) {
         return emit_intrinsic((intrinsic)*(uint32_t*)jl_data_ptr(ff),
-                              args, nargs, ctx);
+                              args, nargs, ctx, expr);
     }
     if (!jl_is_func(ff)) {
         return NULL;
@@ -1458,7 +1529,7 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
     else if (f->fptr == &jl_f_is && nargs==2) {
         rt1 = expr_type(args[1], ctx);
         rt2 = expr_type(args[2], ctx);
-        Value *ans = emit_f_is(rt1,rt2, args[1],args[2], NULL,NULL, ctx);
+        Value *ans = emit_f_is(rt1,rt2, args[1],args[2], NULL,NULL, ctx, expr);
         JL_GC_POP();
         return ans;
     }
@@ -1471,10 +1542,12 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                 if (jl_is_type_type(aty))
                     aty = (jl_value_t*)jl_typeof(jl_tparam0(aty));
                 JL_GC_POP();
+                J2C_UNIMPL("emit known call: jl_f_typeof leaf");               
                 return literal_pointer_val(aty);
             }
             arg1 = boxed(arg1,ctx);
             JL_GC_POP();
+            J2C_UNIMPL("emit known call: jl_f_typeof");
             return emit_typeof(arg1);
         }
     }
@@ -1491,18 +1564,21 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                     BasicBlock *cont = BasicBlock::Create(getGlobalContext(),"after_assert",ctx->f);
                     builder.SetInsertPoint(cont);
                 }
+                J2C_UNIMPL("emit known call: jl_f_typeassert subtype");
                 return v;
             }
             if (tp0 == jl_bottom_type) {
                 emit_expr(args[1], ctx);
                 emit_error("reached code declared unreachable", ctx);
                 JL_GC_POP();
+                J2C_UNIMPL("emit known call: jl_f_typeassert bottom type");
                 return NULL;
             }
             if (!jl_is_tuple(tp0) && jl_is_leaf_type(tp0)) {
                 Value *arg1 = emit_expr(args[1], ctx);
                 emit_typecheck(arg1, tp0, "typeassert", ctx);
                 JL_GC_POP();
+                J2C_UNIMPL("emit known call: jl_f_typeof");
                 return arg1;
             }
         }
@@ -1524,6 +1600,7 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
             builder.CreateCall2(prepare_call(typeassert), arg1, boxed(emit_expr(args[2], ctx),ctx));
             ctx->argDepth = ldepth;
             JL_GC_POP();
+            J2C_UNIMPL("emit known call: jl_subtype");
             return arg1;
         }
     }
@@ -1534,16 +1611,19 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
             jl_value_t *tp0 = jl_tparam0(ty);
             if (arg != jl_bottom_type && jl_subtype(arg, tp0, 0)) {
                 JL_GC_POP();
+                J2C_UNIMPL("emit known call: jl_f_isa");
                 return ConstantInt::get(T_int1,1);
             }
             if (!jl_is_tuple(tp0) && jl_is_leaf_type(tp0) &&
                 !jl_is_type_type(tp0)) {
                 if (jl_is_leaf_type(arg)) {
                     JL_GC_POP();
+                    J2C_UNIMPL("emit known call: jl_f_isa");
                     return ConstantInt::get(T_int1,0);
                 }
                 Value *arg1 = emit_expr(args[1], ctx);
                 JL_GC_POP();
+                J2C_UNIMPL("emit known call: jl_f_isa");
                 return builder.CreateICmpEQ(emit_typeof(arg1),
                                             literal_pointer_val(tp0));
             }
@@ -1555,11 +1635,13 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
             if (symbol_eq(args[1], ctx->vaName) &&
                 !ctx->vars[ctx->vaName].isAssigned) {
                 JL_GC_POP();
+                J2C_UNIMPL("emit known call: jl_f_tuplelen");
                 return emit_n_varargs(ctx);
             }
             else {
                 Value *arg1 = emit_expr(args[1], ctx);
                 JL_GC_POP();
+                J2C_UNIMPL("emit known call: jl_f_tuplelen");
                 return emit_tuplelen(arg1,aty);
             }
         }
@@ -1578,6 +1660,7 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                                                   ConstantInt::get(T_size, ctx->nReqArgs)),
                                 nva);
         JL_GC_POP();
+        J2C_UNIMPL("emit known call: jl_f_apply");
         return r;
     }
     else if (f->fptr == &jl_f_tupleref && nargs==2) {
@@ -1591,6 +1674,9 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                 idx = emit_bounds_check(idx, valen, ctx);
                 idx = builder.CreateAdd(idx, ConstantInt::get(T_size, ctx->nReqArgs));
                 JL_GC_POP();
+                J2C_UNIMPL("emit known call: jl_f_tupleref");
+                //return builder.
+                //  CreateLoad(builder.CreateGEP(ctx->argArray,idx),false);
                 return tbaa_decorate(tbaa_user, builder.
                     CreateLoad(builder.CreateGEP(ctx->argArray,idx),false));
             }
@@ -1603,13 +1689,16 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                 if (idx > 0 && (idx < tlen || (idx == tlen && !isseqt))) {
                     // known to be in bounds
                     JL_GC_POP();
-                    return emit_tupleref(arg1,ConstantInt::get(T_size,idx),tty,ctx);
+                    Value* value = emit_tupleref(arg1,ConstantInt::get(T_size,idx),tty,ctx);
+                    if (in_j2c) j2c_tupleref(args[1], args[2], ctx, expr);
+                    return value;
                 }
                 if (idx==0 || (!isseqt && idx > tlen)) {
                     builder.CreateCall2(prepare_call(jlthrow_line_func),
                                         tbaa_decorate(tbaa_const, builder.CreateLoad(prepare_global(jlboundserr_var))),
                                         ConstantInt::get(T_int32, ctx->lineno));
                     JL_GC_POP();
+                    J2C_UNIMPL("emit known call: jl_f_tupleref");
                     return V_null;
                 }
             }
@@ -1618,12 +1707,14 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                                     emit_unboxed(args[2], ctx), ity);
             emit_bounds_check(idx, tlen, ctx);
             JL_GC_POP();
+            J2C_UNIMPL("emit known call: jl_f_tupleref");
             return emit_tupleref(arg1,idx,tty,ctx);
         }
     }
     else if (f->fptr == &jl_f_tuple) {
         if (nargs == 0) {
             JL_GC_POP();
+            J2C_UNIMPL("emit known call: jl_f_tuple");
             return literal_pointer_val((jl_value_t*)jl_null);
         }
         size_t i;
@@ -1632,8 +1723,9 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
             if (!(jl_isbits(it) && jl_is_leaf_type(it)))
                 break;
         }
+        rt1 = expr_type(expr, ctx);
         if (i >= nargs && ctx->linfo->specTypes) {
-            rt1 = expr_type(expr, ctx);
+//            rt1 = expr_type(expr, ctx);
             if (jl_is_tuple(rt1) && nargs == jl_tuple_len(rt1)) {
                 for(i=0; i < nargs; i++) {
                     // paranoia: make sure the inferred tuple type matches what
@@ -1642,6 +1734,9 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                         break;
                 }
                 if (i >= nargs) {
+                    // In case the left side is a temporary made by us, and its type has not be created before
+                    if (in_j2c) create_c_type(rt1);
+                
                     Type *ty = julia_type_to_llvm(rt1);
                     Value *tpl = NULL;
                     if (ty != T_void)
@@ -1659,6 +1754,7 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                         tpl = emit_tupleset(tpl,ConstantInt::get(T_size,i+1),elt,rt1,ctx);
                     }
                     JL_GC_POP();
+                    if(in_j2c) j2c_tuple(expr, nargs, ctx, rt1);                                        
                     if (ty->isEmptyTy())
                         return mark_julia_type(tpl, rt1);
                     return tpl;
@@ -1724,6 +1820,8 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
         }
         ctx->argDepth = last_depth;
         JL_GC_POP();
+        if(in_j2c) j2c_tuple(expr, nargs, ctx, rt1);                                        
+//        J2C_UNIMPL("emit known call");
         return tup;
     }
     else if (f->fptr == &jl_f_throw && nargs==1) {
@@ -1731,6 +1829,7 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
         JL_GC_POP();
         builder.CreateCall2(prepare_call(jlthrow_line_func), arg1,
                             ConstantInt::get(T_int32, ctx->lineno));
+        if (in_j2c) j2c_throw(ctx, expr);
         return V_null;
     }
     else if (f->fptr == &jl_f_arraylen && nargs==1) {
@@ -1739,7 +1838,9 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
             // todo: also allow e.g. Union of several array types
             Value *arg1 = emit_expr(args[1], ctx);
             JL_GC_POP();
-            return emit_arraylen(arg1, args[1], ctx);
+            Value *val = emit_arraylen(arg1, args[1], ctx);
+            if (in_j2c) j2c_arraylen(args[1], ctx, expr);
+            return val;
         }
     }
     else if (f->fptr == &jl_f_arraysize && nargs==2) {
@@ -1754,10 +1855,13 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                     uint32_t idx = (uint32_t)jl_unbox_long(args[2]);
                     if (idx > 0 && idx <= ndims) {
                         JL_GC_POP();
-                        return emit_arraysize(ary, args[1], idx, ctx);
+                        Value *val = emit_arraysize(ary, args[1], idx, ctx);
+                        if (in_j2c) j2c_arraysize(args[1], idx, ctx, expr);
+                        return val;
                     }
                     else if (idx > ndims) {
                         JL_GC_POP();
+                        J2C_UNIMPL("emit known call: jl_f_arraysize idx > ndims");
                         return ConstantInt::get(T_size, 1);
                     }
                 }
@@ -1786,12 +1890,13 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                     result->addIncoming(v_one, outBB);
                     result->addIncoming(v_sz, inBB);
                     JL_GC_POP();
+                    J2C_UNIMPL("emit known call");
                     return result;
                 }
             }
         }
     }
-    else if (f->fptr == &jl_f_arrayref && nargs>=2) {
+    else if ((f->fptr == &jl_f_arrayref || f->fptr == &jl_f_unsafe_arrayref) && nargs>=2) {
         jl_value_t *aty = expr_type(args[1], ctx); rt1 = aty;
         bool indexes_ok = true;
         for (size_t i=2; i <= nargs; i++) {
@@ -1814,14 +1919,17 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                         ((jl_datatype_t*)ety)->size == 0) {
                         jl_new_struct_uninit((jl_datatype_t*)ety);
                         assert(jl_is_datatype(ety));
+                        J2C_UNIMPL("emit known call: jl_f_arrayref size 0");
                         return literal_pointer_val(((jl_datatype_t*)ety)->instance);
                     }
-                    return typed_load(emit_arrayptr(ary, args[1], ctx), idx, ety, ctx);
+                    Value * val = typed_load(emit_arrayptr(ary, args[1], ctx), idx, ety, ctx); 
+                    if (in_j2c) j2c_arrayref(args[1], nd, &args[2], nargs-1, ctx, expr, f->fptr == &jl_f_unsafe_arrayref);
+                    return val;
                 }
             }
         }
     }
-    else if (f->fptr == &jl_f_arrayset && nargs>=3) {
+    else if ((f->fptr == &jl_f_arrayset || f->fptr == &jl_f_unsafe_arrayset) && nargs>=3) {
         jl_value_t *aty = expr_type(args[1], ctx); rt1 = aty;
         jl_value_t *vty = expr_type(args[2], ctx); rt2 = vty;
         bool indexes_ok = true;
@@ -1852,6 +1960,7 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                                     ety, ctx);
                     }
                     JL_GC_POP();
+                    if (in_j2c) j2c_arrayset(args[1], args[2], nd, &args[3], nargs-2, ctx, expr, f->fptr == &jl_f_unsafe_arrayset);
                     return ary;
                 }
             }
@@ -1860,7 +1969,7 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
     else if (f->fptr == &jl_f_get_field && nargs==2) {
         if (jl_is_quotenode(args[2]) && jl_is_symbol(jl_fieldref(args[2],0))) {
             Value *fld = emit_getfield(args[1],
-                                       (jl_sym_t*)jl_fieldref(args[2],0), ctx);
+                                       (jl_sym_t*)jl_fieldref(args[2],0), ctx, expr);
             JL_GC_POP();
             return fld;
         }
@@ -1875,8 +1984,9 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                 if (idx < nfields) {
                     Value *fld = emit_getfield(args[1],
                                                (jl_sym_t*)jl_tupleref(stt->names, idx),
-                                               ctx);
+                                               ctx, expr);
                     JL_GC_POP();
+                    J2C_UNIMPL("emit known call: jl_f_getfield 2");
                     return fld;
                 }
             }
@@ -1896,6 +2006,7 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                                                  builder.CreateAdd(idx,ConstantInt::get(T_size,1)))));
                         null_pointer_check(fld, ctx);
                         JL_GC_POP();
+                        J2C_UNIMPL("emit known call: jl_f_getfield 3");
                         return fld;
                     }
                     else if (is_tupletype_homogeneous(stt->types)) {
@@ -1904,12 +2015,14 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                         idx = emit_bounds_check(idx, ConstantInt::get(T_size, nfields), ctx);
                         Value *ptr = data_pointer(strct);
                         JL_GC_POP();
+                        J2C_UNIMPL("emit known call: jl_f_getfield");
                         return typed_load(ptr, idx, jt, ctx);
                     }
                     else {
                         idx = builder.CreateSub(idx, ConstantInt::get(T_size, 1));
                         Value *fld = builder.CreateCall2(prepare_call(jlgetnthfieldchecked_func), strct, idx);
                         JL_GC_POP();
+                        J2C_UNIMPL("emit known call: jl_f_getfield 4");
                         return fld;
                     }
                 }
@@ -1931,6 +2044,7 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                                                                  Intrinsic::stackrestore),
                                        stacksave);
                     JL_GC_POP();
+                    J2C_UNIMPL("emit known call: jl_f_getfield 5");
                     return fld;
                 }
             }
@@ -1957,6 +2071,7 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                         rhs = emit_unboxed(args[3], ctx);
                     emit_setfield(sty, strct, idx, rhs, ctx);
                     JL_GC_POP();
+                    J2C_UNIMPL("emit known call: jl_f_set_field");
                     return rhs;
                 }
             }
@@ -1976,6 +2091,7 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                                               jl_tuple_len(ctx->sp)/2);
             if (jl_is_leaf_type(ty)) {
                 JL_GC_POP();
+                J2C_UNIMPL("emit known call: jl_f_instantiate_type");
                 return literal_pointer_val(ty);
             }
         }
@@ -1986,7 +2102,7 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
 }
 
 static Value *emit_jlcall(Value *theFptr, Value *theF, jl_value_t **args,
-                          size_t nargs, jl_codectx_t *ctx)
+                          size_t nargs, jl_codectx_t *ctx, jl_value_t *expr)
 {
     // emit arguments
     int argStart = ctx->argDepth;
@@ -2008,8 +2124,13 @@ static Value *emit_jlcall(Value *theFptr, Value *theF, jl_value_t **args,
     Value *result = builder.CreateCall3(prepare_call(theFptr), theF, myargs,
                                         ConstantInt::get(T_int32,nargs));
     ctx->argDepth = argStart;
+    
+    if (in_j2c) j2c_jlcall(ctx, expr);
+    
     return result;
 }
+
+extern char * c_identifier(jl_sym_t *s);
 
 static Value *emit_call(jl_value_t **args, size_t arglen, jl_codectx_t *ctx,
                         jl_value_t *expr)
@@ -2032,7 +2153,7 @@ static Value *emit_call(jl_value_t **args, size_t arglen, jl_codectx_t *ctx,
     hdtype = expr_type(a0, ctx);
     if (theFptr == NULL) {
         specialized = false;
-        Value *theFunc = emit_expr(args[0], ctx);
+        Value *theFunc = emit_expr(a0, ctx);
         if (theFunc->getType() != jl_pvalue_llvmt || jl_is_tuple(hdtype)) {
             // we know it's not a function
             emit_type_error(theFunc, (jl_value_t*)jl_function_type, "apply", ctx);
@@ -2095,10 +2216,16 @@ static Value *emit_call(jl_value_t **args, size_t arglen, jl_codectx_t *ctx,
         }
         assert(idx == nfargs);
         result = builder.CreateCall(prepare_call(cf), ArrayRef<Value*>(&argvals[0],nfargs));
-        result = mark_julia_type(result, jl_ast_rettype(f->linfo, f->linfo->ast));
+        if (result->getType() == T_void) {
+            result = literal_pointer_val((jl_value_t*)jl_nothing);
+        }
+        else {
+            result = mark_julia_type(result, jl_ast_rettype(f->linfo, f->linfo->ast));
+        }
+        if (in_j2c) j2c_known_call(f, args, nargs, ctx, expr);
     }
     else {
-        result = emit_jlcall(theFptr, theF, &args[1], nargs, ctx);
+        result = emit_jlcall(theFptr, theF, &args[1], nargs, ctx, expr);
     }
 
     ctx->argDepth = last_depth;
@@ -2146,7 +2273,7 @@ static Value *global_binding_pointer(jl_module_t *m, jl_sym_t *s,
 }
 
 // yields a jl_value_t** giving the binding location of a variable
-static Value *var_binding_pointer(jl_sym_t *s, jl_binding_t **pbnd,
+Value *var_binding_pointer(jl_sym_t *s, jl_binding_t **pbnd,
                                   bool assign, jl_codectx_t *ctx)
 {
     if (jl_is_symbolnode(s))
@@ -2263,8 +2390,20 @@ static Value *emit_var(jl_sym_t *sym, jl_value_t *ty, jl_codectx_t *ctx, bool is
     return emit_checked_var(bp, sym, ctx);
 }
 
-static void emit_assignment(jl_value_t *l, jl_value_t *r, jl_codectx_t *ctx)
-{
+static void emit_assignment(jl_value_t *l, jl_value_t *r, jl_codectx_t *ctx, jl_value_t *ast_node)
+{   
+#ifdef J2C_VERBOSE
+    if (enable_j2c_verbose) {
+    if (in_j2c) {
+        static int count=0;
+        count++;
+        JL_PRINTF(JL_STDOUT, "### emit assignment %d:\n", count);
+        jl_static_show(JL_STDOUT, ast_node);
+        JL_PRINTF(JL_STDOUT, "\n");
+    }
+    }
+#endif      
+
     jl_sym_t *s = NULL;
     if (jl_is_symbol(l))
         s = (jl_sym_t*)l;
@@ -2287,7 +2426,7 @@ static void emit_assignment(jl_value_t *l, jl_value_t *r, jl_codectx_t *ctx)
         if ((jl_is_symbol(r) || jl_is_symbolnode(r)) && rt == jl_bottom_type) {
             // sometimes x = y::None occurs
             if (builder.GetInsertBlock()->getTerminator() != NULL)
-                return;
+                goto end_emit_assignment;
         }
         if (bp != NULL) {
             Type *vt = bp->getType();
@@ -2328,6 +2467,9 @@ static void emit_assignment(jl_value_t *l, jl_value_t *r, jl_codectx_t *ctx)
             vi.SAvalue = rval;
         }
     }
+    
+end_emit_assignment:
+    if (in_j2c) j2c_assignment(l, r, ctx, ast_node);
 }
 
 // --- convert expression to code ---
@@ -2352,6 +2494,11 @@ static Value *emit_condition(jl_value_t *cond, const std::string &msg, jl_codect
 static Value *emit_expr(jl_value_t *expr, jl_codectx_t *ctx, bool isboxed,
                         bool valuepos)
 {
+#ifdef J2C_VERBOSE
+    static int count=0;
+    print_in_out pio("**** emit expr ", count, expr);
+#endif    
+
     if (jl_is_symbol(expr)) {
         if (!valuepos) return NULL;
         return emit_var((jl_sym_t*)expr, (jl_value_t*)jl_undef_type, ctx, isboxed);
@@ -2369,11 +2516,13 @@ static Value *emit_expr(jl_value_t *expr, jl_codectx_t *ctx, bool isboxed,
         }
         ctx->f->getBasicBlockList().push_back(bb);
         builder.SetInsertPoint(bb);
+        if (in_j2c) j2c_labelnode(expr, ctx);
         return NULL;
     }
     else if (jl_is_linenode(expr)) {
         if (valuepos)
             jl_error("Linenode in value position");
+        if (in_j2c) j2c_linenode(expr, ctx);
         return NULL;
     }
     else if (jl_is_quotenode(expr)) {
@@ -2396,11 +2545,12 @@ static Value *emit_expr(jl_value_t *expr, jl_codectx_t *ctx, bool isboxed,
                                                    "br", ctx->f);
             builder.SetInsertPoint(after);
         }
+        if (in_j2c) j2c_goto(expr, ctx);
         return NULL;
     }
     else if (jl_is_getfieldnode(expr)) {
         return emit_getfield(jl_fieldref(expr,0),
-                             (jl_sym_t*)jl_fieldref(expr,1), ctx);
+                             (jl_sym_t*)jl_fieldref(expr,1), ctx, expr);
     }
     else if (jl_is_topnode(expr)) {
         jl_sym_t *var = (jl_sym_t*)jl_fieldref(expr,0);
@@ -2479,14 +2629,16 @@ static Value *emit_expr(jl_value_t *expr, jl_codectx_t *ctx, bool isboxed,
             builder.CreateCondBr(isfalse, ifnot, ifso);
         }
         builder.SetInsertPoint(ifso);
+        
+        if (in_j2c) j2c_gotoifnot(cond, labelname, ctx, expr);
     }
 
-    else if (head == call_sym || head == call1_sym) {
+    else if (head == call_sym || head == call1_sym) {    
         return emit_call(args, jl_array_dim0(ex->args), ctx, (jl_value_t*)ex);
     }
 
     else if (head == assign_sym) {
-        emit_assignment(args[0], args[1], ctx);
+        emit_assignment(args[0], args[1], ctx, (jl_value_t*)ex);
         if (valuepos) {
             return literal_pointer_val((jl_value_t*)jl_nothing);
         }
@@ -2595,8 +2747,10 @@ static Value *emit_expr(jl_value_t *expr, jl_codectx_t *ctx, bool isboxed,
                             CreateInsertValue(strct, fval, ArrayRef<unsigned>(&idx,1));
                         idx++;
                     }
+                    if (in_j2c) j2c_new_sym(ty, na, args, ctx, expr); 
                     return mark_julia_type(strct,ty);
                 }
+                J2C_UNIMPL("new_sym");
                 Value *f1 = NULL;
                 size_t j = 0;
                 int fieldStart = ctx->argDepth;
@@ -2650,12 +2804,14 @@ static Value *emit_expr(jl_value_t *expr, jl_codectx_t *ctx, bool isboxed,
                 return strct;
             }
             else {
+                J2C_UNIMPL("new_sym");            
                 // 0 fields, singleton
                 return literal_pointer_val(jl_new_struct_uninit((jl_datatype_t*)ty));
             }
         }
+        J2C_UNIMPL("new_sym");
         Value *typ = emit_expr(args[0], ctx);
-        return emit_jlcall(jlnew_func, typ, &args[1], nargs-1, ctx);
+        return emit_jlcall(jlnew_func, typ, &args[1], nargs-1, ctx, expr);
     }
     else if (head == exc_sym) {
         return builder.CreateLoad(prepare_global(jlexc_var), true);
@@ -2747,7 +2903,7 @@ static Value *emit_expr(jl_value_t *expr, jl_codectx_t *ctx, bool isboxed,
             return valuepos ? literal_pointer_val(jl_nothing) : NULL;
         }
         // some expression types are metadata and can be ignored
-        if (valuepos || !(head == line_sym || head == type_goto_sym)) {
+        if (valuepos && !(head == line_sym || head == type_goto_sym)) {
             if (head == abstracttype_sym || head == compositetype_sym ||
                 head == bitstype_sym) {
                 jl_errorf("type definition not allowed inside a local scope");
@@ -2759,6 +2915,10 @@ static Value *emit_expr(jl_value_t *expr, jl_codectx_t *ctx, bool isboxed,
                 jl_errorf("unsupported or misplaced expression %s in function %s",
                           head->name, ctx->linfo->name->name);
             }
+        }
+        
+        if (in_j2c) {
+            if (head == line_sym) j2c_linesym(expr, ctx);
         }
     }
     return NULL;
@@ -3013,6 +3173,8 @@ static Function *gen_jlcall_wrapper(jl_lambda_info_t *lam, jl_expr_t *ast, Funct
     return w;
 }
 
+bool should_j2c(const char* func_name);
+
 // cstyle = compile with c-callable signature, not jlcall
 static Function *emit_function(jl_lambda_info_t *lam, bool cstyle)
 {
@@ -3042,7 +3204,27 @@ static Function *emit_function(jl_lambda_info_t *lam, bool cstyle)
     ctx.vaName = NULL;
     ctx.vaStack = false;
     ctx.boundsCheck.push_back(true);
-
+    
+    // Prepare for Julia to C conversion.
+    bool prev_in_j2c = in_j2c;
+    bool should_j2c_cur_func = J2C_FLAG_J2C(lam->j2cflag) || should_j2c(ctx.funcName.c_str());
+    in_j2c = should_j2c_cur_func;
+    bool j2c_root_func = !in_j2c_overall && in_j2c; // first time we turn on j2c
+    if (j2c_root_func) {
+        in_j2c_overall = true;
+    }
+    
+#ifdef J2C_VERBOSE
+    if (enable_j2c_verbose) {
+    if (should_j2c_cur_func) 
+    {
+        JL_PRINTF(JL_STDOUT, "******* emitfunc %s****\n", ctx.funcName.c_str());
+        jl_static_show(JL_STDOUT, (jl_value_t*)ast);
+        JL_PRINTF(JL_STDOUT, "\n");
+    }
+    }
+#endif
+    
     // step 2. process var-info lists to see what vars are captured, need boxing
     jl_array_t *largs = jl_lam_args(ast);
     size_t largslen = jl_array_dim0(largs);
@@ -3575,6 +3757,40 @@ static Function *emit_function(jl_lambda_info_t *lam, bool cstyle)
         }
     }
 
+    ast_node_result_t* prev_func_result = cur_func_result;
+    if (should_j2c_cur_func) {
+        cur_func_result = get_ast_node_result((jl_value_t *)ast, &ctx);
+        cur_func_result->is_root_func = j2c_root_func;
+        j2c_create_type_table(lam, ast);
+        j2c_create_func_signature(lam, ast, &ctx);
+        functions.push_back(cur_func_result);
+
+        std::set<std::string> private_vars;
+
+        jl_array_t *vinfos = jl_lam_vinfo(ast);
+        size_t vinfoslen = jl_array_dim0(vinfos);
+
+        if(private_vars.size()) {
+            std::set<std::string>::iterator iter = private_vars.begin();
+    
+            std::stringstream ss;
+            ss << "private(" << *iter;
+
+            for(++iter;
+                iter != private_vars.end();
+              ++iter) {
+                ss << "," << *iter;
+            }
+    
+            ss << ")";
+
+            cur_func_result->private_vars = ss.str();
+        } else {
+            cur_func_result->private_vars = "";
+        }
+        //printf("private_vars = %s, cur_func_result = %p\n", cur_func_result->private_vars.c_str(), cur_func_result);
+    }
+    
     // step 15. compile body statements
     bool prevlabel = false;
     for(i=0; i < stmtslen; i++) {
@@ -3596,7 +3812,14 @@ static Function *emit_function(jl_lambda_info_t *lam, bool cstyle)
             ctx.lineno = lno;
         }
         if (jl_is_labelnode(stmt)) {
-            if (prevlabel) continue;
+            if (prevlabel) {
+                if (should_j2c_cur_func) {
+                    ast_node_result_t *stmt_result = get_ast_node_result(stmt, &ctx);
+                    CONNECT_PARENT_CHILD(cur_func_result, stmt_result);
+                    j2c_labelnode(stmt, &ctx);
+                }
+                continue;
+            }
             prevlabel = true;
         }
         else {
@@ -3633,9 +3856,32 @@ static Function *emit_function(jl_lambda_info_t *lam, bool cstyle)
                     BasicBlock::Create(getGlobalContext(), "ret", ctx.f);
                 builder.SetInsertPoint(bb);
             }
+            if (should_j2c_cur_func) j2c_return(stmt, &ctx, j2c_root_func);
         }
         else {
             (void)emit_expr(stmt, &ctx, false, false);
+        }
+        
+        if (should_j2c_cur_func) {
+            ast_node_result_t *stmt_result = get_ast_node_result(stmt, &ctx);
+            CONNECT_PARENT_CHILD(cur_func_result, stmt_result);
+            
+            // Due to min temps, some nodes like calls do not have assignment as its result
+            if (jl_is_expr(stmt) && stmt_result->epilog == NULL) {
+                if (((jl_expr_t*)stmt)->head == call_sym || ((jl_expr_t*)stmt)->head == call1_sym) {
+                    NEW_C_CODE_3(stmt_result->epilog, "%s\n;", result_variable_string(stmt_result));
+                }
+            }
+    
+#if 0
+            JL_PRINTF(JL_STDOUT, "========  statement ============\n");
+            jl_static_show(JL_STDOUT, stmt);
+            JL_PRINTF(JL_STDOUT, "\n\n");    
+            FILE* fs = fopen("temporary1", "a");
+            fprintf(fs, "\n$$$$$ statement reuslt:\n");
+            dump_ast_node(stmt_result, fs, NULL);
+            fclose(fs);
+#endif           
         }
     }
     // sometimes we have dangling labels after the end
@@ -3658,6 +3904,17 @@ static Function *emit_function(jl_lambda_info_t *lam, bool cstyle)
     if (debug_enabled)
         ctx.dbuilder->finalize();
 
+    if (should_j2c_cur_func) {
+        j2c_declare_local_and_tmp_vars(ast, lam, &ctx);        
+    }
+    
+    cur_func_result = prev_func_result;
+    in_j2c          = prev_in_j2c;
+    if (j2c_root_func) {
+        in_j2c_overall = false;
+        j2c_dump_all_funcs();
+    }
+    
     JL_GC_POP();
     return f;
 }
@@ -4178,6 +4435,55 @@ static void init_julia_llvm_env(Module *m)
     FPM->doInitialization();
 }
 
+// The user experience of PSE should be: user fills in a form in GUI, which stores as a configuration file;
+// then the file is read and the parameters are retrieved.
+
+// Remember all the key function names in the configuration. 
+void Tokenize(const std::string& str, std::vector<std::string>& tokens, const std::string& delimiters) {
+    // Skip delimiters at beginning.
+    std::string::size_type lastPos = str.find_first_not_of(delimiters, 0);
+    // Find first "non-delimiter".
+    std::string::size_type pos     = str.find_first_of(delimiters, lastPos);
+
+    while (std::string::npos != pos || std::string::npos != lastPos) {
+        // Found a token, add it to the vector.
+        tokens.push_back(str.substr(lastPos, pos - lastPos));
+        // Skip delimiters.  Note the "not_of"
+        lastPos = str.find_first_not_of(delimiters, pos);
+        // Find next "non-delimiter"
+        pos = str.find_first_of(delimiters, lastPos);
+    }
+}
+
+static void jl_init_j2c()
+{
+        char path[300], *home;
+        home = getenv("JULIA_ROOT");
+}
+
+char *no_j2c_funcs[] = {
+    "promote_shape", "broadcast!", "broadcast!_function", "ht_keyindex", "gen_broadcast_body", "getindex",
+    "display_error", "broadcast_shape", "fill!", "print_to_string", "ht_keyindex2", "rehash", "resize!",
+    "Dict", "_setindex!", "gen_broadcast_function", 
+    NULL
+};
+
+bool should_j2c(const char* func_name)
+{
+    // If we are in j2c overall, then unless this function is specially handled, we should 
+    // just translate it.
+    if (in_j2c_overall) {
+        for (size_t i = 0; no_j2c_funcs[i] != NULL; i++) {
+            if (strcmp(no_j2c_funcs[i], func_name) == 0) {
+                return false;
+            } 
+        }       
+    }
+    
+    return in_j2c_overall; 
+}   
+
+
 extern "C" void jl_init_codegen(void)
 {
 #ifdef DEBUG
@@ -4327,6 +4633,9 @@ extern "C" void jl_init_codegen(void)
                                          (void*)&restore_arg_area_loc);
 
     typeToTypeId = jl_alloc_cell_1d(16);
+    jl_gc_preserve((jl_value_t*)typeToTypeId);
+    
+    jl_init_j2c();
 }
 
 /*

@@ -520,6 +520,7 @@ static void jl_serialize_value_(ios_t *s, jl_value_t *v)
         jl_serialize_value(s, (jl_value_t*)li->name);
         jl_serialize_value(s, (jl_value_t*)li->specTypes);
         jl_serialize_value(s, (jl_value_t*)li->specializations);
+        write_int32(s, li->j2cflag);
         write_int8(s, li->inferred);
         jl_serialize_value(s, (jl_value_t*)li->file);
         write_int32(s, li->line);
@@ -817,6 +818,7 @@ static jl_value_t *jl_deserialize_value_internal(ios_t *s)
         li->name = (jl_sym_t*)jl_deserialize_value(s);
         li->specTypes = (jl_tuple_t*)jl_deserialize_value(s);
         li->specializations = (jl_array_t*)jl_deserialize_value(s);
+        li->j2cflag = read_int32(s);
         li->inferred = read_int8(s);
         li->file = (jl_sym_t*)jl_deserialize_value(s);
         li->line = read_int32(s);
@@ -1234,6 +1236,7 @@ void jl_init_serializer(void)
                      jl_symbol("getfield"), jl_symbol("setfield!"),
                      jl_symbol("tupleref"), jl_symbol("tuplelen"),
                      jl_symbol("apply_type"), tuple_sym,
+                     jl_symbol("unsafe_arrayset"), jl_symbol("unsafe_arrayref"),
 
                      jl_box_int32(0), jl_box_int32(1), jl_box_int32(2),
                      jl_box_int32(3), jl_box_int32(4), jl_box_int32(5),
@@ -1336,7 +1339,8 @@ void jl_init_serializer(void)
                           jl_f_invoke, jl_apply_generic,
                           jl_unprotect_stack, jl_f_task,
                           jl_f_yieldto, jl_f_ctor_trampoline,
-                          jl_f_new_module,
+                          jl_f_new_module, jl_f_unsafe_arrayref,
+                          jl_f_unsafe_arrayset,
                           NULL };
     i=2;
     while (fptrs[i-2] != NULL) {

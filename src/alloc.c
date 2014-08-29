@@ -401,6 +401,7 @@ jl_lambda_info_t *jl_new_lambda_info(jl_value_t *ast, jl_tuple_t *sparams)
     li->functionID = 0;
     li->cFunctionID = 0;
     li->specTypes = NULL;
+    li->j2cflag = 0;
     li->inferred = 0;
     li->inInference = 0;
     li->inCompile = 0;

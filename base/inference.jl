@@ -474,12 +474,12 @@ function builtin_tfunction(f::ANY, args::ANY, argtypes::ANY)
             return Type{map(t->t.parameters[1], t)}
         end
         return t
-    elseif is(f,arrayset)
+    elseif is(f,arrayset) || is(f,unsafe_arrayset)
         if length(argtypes) < 3
             return None
         end
         return argtypes[1]
-    elseif is(f,arrayref)
+    elseif is(f,arrayref) || is(f,unsafe_arrayref)
         if length(argtypes) < 2
             return None
         end
@@ -1818,7 +1818,7 @@ function without_linenums(a::Array{Any,1})
 end
 
 const _pure_builtins = {tuple, tupleref, tuplelen, fieldtype, apply_type, is, isa, typeof} # known affect-free calls (also effect-free)
-const _pure_builtins_volatile = {getfield, arrayref} # known effect-free calls (might not be affect-free)
+const _pure_builtins_volatile = {getfield, arrayref, unsafe_arrayref} # known effect-free calls (might not be affect-free)
 
 function is_pure_builtin(f)
     if contains_is(_pure_builtins, f)
@@ -1984,7 +1984,7 @@ function inlineable(f, e::Expr, atypes, sv, enclosing_ast)
     if !(atypes <: meth[1])
         return NF
     end
-    if !isa(linfo,LambdaStaticData) || meth[3].func.env !== ()
+    if !isa(linfo,LambdaStaticData) || meth[3].func.env !== () || (linfo.j2cflag & 2 == 2)
         return NF
     end
 
@@ -2019,7 +2019,7 @@ function inlineable(f, e::Expr, atypes, sv, enclosing_ast)
 
     body = Expr(:block)
     body.args = without_linenums(ast.args[3].args)::Array{Any,1}
-    if !inline_worthy(body)
+    if !(linfo.j2cflag & 1 == 1) && !inline_worthy(body)
         return NF
     end
 

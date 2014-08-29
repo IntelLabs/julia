@@ -146,6 +146,7 @@ typedef struct _jl_lambda_info_t {
     jl_value_t *capt;  // captured var info
     jl_sym_t *file;
     int32_t line;
+    int32_t j2cflag;    // high-to-low  [j2c?][inline?]
     int8_t inferred;
 
     // hidden fields:
@@ -159,6 +160,8 @@ typedef struct _jl_lambda_info_t {
     int32_t functionID; // index that this function will have in the codegen table
     int32_t cFunctionID; // index that this cFunction will have in the codegen table
 } jl_lambda_info_t;
+
+#define J2C_FLAG_J2C(flag) (((flag) & 0x2) == 0x2)
 
 #define LAMBDA_INFO_NW (NWORDS(sizeof(jl_lambda_info_t))-1)
 
@@ -714,6 +717,7 @@ DLLEXPORT void *jl_unbox_voidpointer(jl_value_t *v);
 
 // structs
 DLLEXPORT int jl_field_index(jl_datatype_t *t, jl_sym_t *fld, int err);
+DLLEXPORT jl_value_t *jl_get_field(jl_value_t *v, char *fld);
 DLLEXPORT jl_value_t *jl_get_nth_field(jl_value_t *v, size_t i);
 DLLEXPORT jl_value_t *jl_get_nth_field_checked(jl_value_t *v, size_t i);
 DLLEXPORT void        jl_set_nth_field(jl_value_t *v, size_t i, jl_value_t *rhs);

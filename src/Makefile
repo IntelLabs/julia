@@ -64,7 +64,7 @@ julia_flisp.boot: julia-parser.scm julia-syntax.scm \
 	match.scm utils.scm jlfrontend.scm mk_julia_flisp_boot.scm flisp/libflisp.a
 	@$(call PRINT_FLISP, $(call spawn,./flisp/flisp) ./mk_julia_flisp_boot.scm)
 
-codegen.o codegen.do: intrinsics.cpp debuginfo.cpp cgutils.cpp ccall.cpp disasm.cpp
+codegen.o codegen.do: intrinsics.cpp debuginfo.cpp cgutils.cpp ccall.cpp disasm.cpp j2c.cpp j2c.h j2c-calls.cpp
 builtins.o builtins.do: table.c
 
 support/libsupport.a: support/*.h support/*.c
