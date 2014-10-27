@@ -1704,6 +1704,7 @@ void jl_init_serializer(void)
                      jl_symbol("convert"), jl_symbol("typeassert"),
                      jl_symbol("getfield"), jl_symbol("setfield!"),
                      jl_symbol("tupleref"), jl_symbol("tuplelen"),
+                     jl_symbol("bytesref"), jl_symbol("byteslen"),
                      jl_symbol("apply_type"), tuple_sym,
 
                      jl_box_int32(0), jl_box_int32(1), jl_box_int32(2),
@@ -1792,7 +1793,8 @@ void jl_init_serializer(void)
                           jl_f_typeassert, jl_f_apply,
                           jl_f_top_eval, jl_f_isdefined,
                           jl_f_tuple, jl_f_tupleref,
-                          jl_f_tuplelen, jl_f_get_field,
+                          jl_f_tuplelen, jl_f_bytesref,
+                          jl_f_byteslen, jl_f_get_field,
                           jl_f_set_field, jl_f_field_type,
                           jl_f_arraylen, jl_f_arrayref,
                           jl_f_arrayset, jl_f_arraysize,

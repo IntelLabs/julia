@@ -317,6 +317,7 @@ extern DLLEXPORT jl_tuple_t *jl_tuple_type;
 extern DLLEXPORT jl_value_t *jl_tupletype_type;
 extern DLLEXPORT jl_datatype_t *jl_ntuple_type;
 extern DLLEXPORT jl_typename_t *jl_ntuple_typename;
+extern DLLEXPORT jl_datatype_t *jl_bytes_type;
 extern DLLEXPORT jl_datatype_t *jl_tvar_type;
 extern DLLEXPORT jl_datatype_t *jl_task_type;
 
@@ -483,6 +484,7 @@ extern jl_sym_t *arrow_sym; extern jl_sym_t *ldots_sym;
 #define jl_is_null(v)        (((jl_value_t*)(v)) == ((jl_value_t*)jl_null))
 #define jl_is_nothing(v)     (((jl_value_t*)(v)) == ((jl_value_t*)jl_nothing))
 #define jl_is_tuple(v)       jl_typeis(v,jl_tuple_type)
+#define jl_is_bytes(v)       jl_typeis(v,jl_bytes_type)
 #define jl_is_datatype(v)    jl_typeis(v,jl_datatype_type)
 #define jl_is_pointerfree(t) (((jl_datatype_t*)t)->pointerfree)
 #define jl_is_mutable(t)     (((jl_datatype_t*)t)->mutabl)
@@ -529,6 +531,16 @@ extern jl_sym_t *arrow_sym; extern jl_sym_t *ldots_sym;
 #define jl_is_cpointer(v)    jl_is_cpointer_type(jl_typeof(v))
 #define jl_is_pointer(v)     jl_is_cpointer_type(jl_typeof(v))
 #define jl_is_gf(f)          (((jl_function_t*)(f))->fptr==jl_apply_generic)
+
+STATIC_INLINE uint8_t jl_bytesref(jl_bytes_t *b, size_t i)
+{
+    return b->there.neglen < 0 ? b->there.data[i] : b->here.data[i];
+}
+
+STATIC_INLINE size_t jl_byteslen(jl_bytes_t *b)
+{
+    return b->there.neglen < 0 ? -b->there.neglen : b->here.length;
+}
 
 STATIC_INLINE int jl_is_bitstype(void *v)
 {

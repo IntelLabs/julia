@@ -27,6 +27,7 @@ jl_tuple_t *jl_tuple_type;
 jl_value_t *jl_tupletype_type;
 jl_datatype_t *jl_ntuple_type;
 jl_typename_t *jl_ntuple_typename;
+jl_datatype_t *jl_bytes_type;
 jl_datatype_t *jl_tvar_type;
 jl_datatype_t *jl_uniontype_type;
 jl_datatype_t *jl_datatype_type;
@@ -2957,6 +2958,8 @@ void jl_init_types(void)
     jl_sym_type->mutabl = 1;
 
     // now they can be used to create the remaining base kinds and types
+    jl_bytes_type = jl_new_datatype(jl_symbol("Bytes"), jl_any_type, jl_null,
+                                    jl_null, jl_null, 0, 0);
     jl_void_type = jl_new_datatype(jl_symbol("Void"), jl_any_type, jl_null,
                                    jl_null, jl_null, 0, 0);
     jl_nothing = newstruct(jl_void_type);
