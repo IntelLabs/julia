@@ -120,6 +120,20 @@ STATIC_INLINE int jl_array_ndimwords(uint32_t ndims)
     return (ndims < 3 ? 0 : ndims-2);
 }
 
+typedef struct {
+    JL_DATA_TYPE
+    union {
+        struct {
+            uint8_t data[2*sizeof(void*)-1];
+            uint8_t length;
+        } here;
+        struct {
+            uint8_t *data;
+            long neglen;
+        } there;
+    };
+} jl_bytes_t;
+
 typedef jl_value_t *(*jl_fptr_t)(jl_value_t*, jl_value_t**, uint32_t);
 
 typedef struct _jl_lambda_info_t {
@@ -647,6 +661,7 @@ DLLEXPORT jl_tuple_t *jl_alloc_tuple(size_t n);
 DLLEXPORT jl_tuple_t *jl_alloc_tuple_uninit(size_t n);
 DLLEXPORT jl_tuple_t *jl_tuple_append(jl_tuple_t *a, jl_tuple_t *b);
 DLLEXPORT jl_tuple_t *jl_tuple_fill(size_t n, jl_value_t *v);
+DLLEXPORT jl_bytes_t *jl_bytes(const uint8_t *data, size_t n);
 DLLEXPORT jl_sym_t *jl_symbol(const char *str);
 DLLEXPORT jl_sym_t *jl_symbol_lookup(const char *str);
 DLLEXPORT jl_sym_t *jl_symbol_n(const char *str, int32_t len);
