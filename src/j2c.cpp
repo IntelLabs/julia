@@ -2153,7 +2153,7 @@ static void j2c_dump_all_funcs()
 	// to Xeon Phi.
 	char command[1000];
     sprintf(command,"bcpp temporary > %s/j2c/out.cpp 2> /dev/null", home);
-	if (system(command) == -1) {
+	if (system(command) != 0) {
         JL_PRINTF(JL_STDOUT, "Beautifying output failed\n");
         sprintf(command,"mv temporary %s/j2c/out.cpp", home);
         system(command);

@@ -1,10 +1,47 @@
-First, you need to set JULIA_ROOT environment to the full path to this
-directory. This is where j2c output file, and object file will be stored.
+Julia2C is a source-to-source translator from Julia to C. This initial version converts basic Julia types and expressions into corresponding C types and statements. 
 
-To run J2C example, go to the julia/test directory, run:
+By translating Julia to C, we leverage the high-level abstractions (matrix, vector, ..), which are easier to analyze, and can potentially add the rich extensions of C (like openmp, tbb, ...). The tool may also extend Julia to new architectures where the only available tool chain is for C.
 
-  ../julia j2c.jl
+Usage: 
+    User specifies 1 Julia function to be translated into native C.
+    In the Julia code generation phase, J2C recursively compiles this function
+        and all its direct and indirect callees into C. That is, the whole 
+        call graph is translated. 
+    A C compiler is invoked to translate the C code into a shared library.
+    The original call to the user Julia function is replaced by a call to
+        this shared library.
 
-It should finish without any error. Check julia/j2c directory for the 
-intermediate files during J2C compilation.
+Code Structure:
+    There are two main parts of the code:
+    1.  Traverse the AST tree of a function. 
+        This is embedded into codegen.cpp and a few other files to minimize
+            our coding efforts. It is better to make it a self-contained
+            module or external package, though.
 
+    2.  Map Julia types and AST nodes to C types and statements. 
+        This is in j2c.cpp.
+
+An example:
+    1. (Optional) Install bcpp, a C beautifier
+        sudo apt-get install bcpp    // this works on Ubuntu
+        
+    2. Checkout the source.
+        git clone -b j2c https://github.com/IntelLabs/julia.git j2c
+
+    3. Build
+        cd j2c
+        make
+
+    4. Run
+        export JULIA_ROOT=$PWD
+        cd test
+        ../julia j2c.jl
+
+    5. Look at the output file
+        vi ../j2c/out.cpp
+
+        Some notes: 
+        (1) offload(sumOfThree, (Int,)) turns J2C flag on for function sumOfthree.
+        (2) sumOfThree(1) invokes code generation for sumOfThree once, where the
+            J2C flag is checked, and the function is J2C'ed.
+        (3) j2c_sumOfThree calls the J2C'ed sumOfThree().
