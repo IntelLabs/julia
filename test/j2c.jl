@@ -61,7 +61,7 @@ offload(sumOfThree, (Int,))
 sumOfThree(1)
 
 @eval function j2c_sumOfThree(N::Int)
-  ret_out_dims = zeros(Cint, 1)
+  ret_out_dims = zeros(Cint, 2)
   result = ccall((:sumOfThree_, $(libname)), Ptr{Float64}, (Int, Int, Int, Ptr{Cint},), -1, N, 1, ret_out_dims)
   rod64 = convert(Array{Int,1}, ret_out_dims)
   reshape(pointer_to_array(result,prod(ret_out_dims),true),tuple(rod64...))
