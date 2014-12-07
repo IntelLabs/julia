@@ -15,8 +15,7 @@ Code Structure:
     There are two main parts of the code:
     1.  Traverse the AST tree of a function. 
         This is embedded into codegen.cpp and a few other files to minimize
-            our coding efforts. It is better to make it a self-contained
-            module or external package, though.
+            our coding efforts. 
 
     2.  Map Julia types and AST nodes to C types and statements. 
         This is in j2c.cpp.
@@ -45,3 +44,61 @@ An example:
         (2) sumOfThree(1) invokes code generation for sumOfThree once, where the
             J2C flag is checked, and the function is J2C'ed.
         (3) j2c_sumOfThree calls the J2C'ed sumOfThree().
+
+Current Status:
+    C is a static typed language. Therefore, One must make sure the Julia function
+    to be converted to C is fully typed. We do not have a checker that checks 
+    that condition before translation.
+    
+    The current release handles only common cases. Search J2C_UNIMPL in src/*.cpp
+    for unimplemented cases.
+    
+    However, with the framework provided, it should be easy for you to add new cases.
+    Follow the example of handling arraysize (Other cases are handled in 
+    the same way):
+        1. After the normal LLVM IR codegen is done, add a call to j2c 
+	
+             Codegen.cpp line 1859: 
+	        if (in_j2c) j2c_arraysize(args[1], idx, ctx, expr);
+		
+	2. j2c.cpp: add a function for the case.
+	    This function builds a result tree, and attaches to it C statements,
+	
+	    static void j2c_arraysize(jl_value_t *a, uint32_t index, jl_codectx_t *ctx,
+	                              jl_value_t *expr)
+            {
+                // Build a "result tree", whose structure mimics the AST.
+		// In this case, expr is the expression arraysize(a, index), 
+		// and a is the array, which may be an expresssion itself.
+		// The result tree of a has been built before: this is guanranteed
+		// since we have followed the code generation process of LLVM IR, which
+		// handles the argument (a) first before handling arraysize; 
+		// during its handling of a, J2C has already been invoked to build 
+		// up the result tree for a.
+		
+		// We get the result node for each of expr and a, and 
+		// connect them as parent-child. The parent-child relationship 
+		// is to be used for dumping out the cpp file: all chilldren 
+		// must be dumped out before the parent. For example, in this
+		// case, since we must evaluate a first before evaluating 
+		// arraysize(a), we will dump the result node of a first. 
+		
+                ast_node_result_t* result = get_ast_node_result(expr, ctx);
+		ast_node_result_t* a1 = get_ast_node_result(a, ctx);
+		CONNECT_PARENT_CHILD(result, a1);
+		
+		// Generate a string "t=ARRAYSIZE(a, index)" for the output c file.
+		// Here t is a temporary symbol representing the result of the expression.
+		// To avoid verbose code generation full of such t's, we actually 
+		// propagate constants (the string "ARRAYSIZE(a, index)") on the
+		// fly in j2c_copy() and other places.
+		
+		NEW_C_CODE_4(scratch_str, "ARRAYSIZE(%s, %d)", result_variable_string(a1), index);
+		j2c_copy(result, scratch_str);	
+            }	
+	    
+    J2C is reusing the process of LLVM IR code gneration, and thus Step 1 in the above
+    example is embedded in the LLVM IR code generator (in codegen.cpp). 
+    It is better to separate J2C into a self-contained module or external package. In 
+    that way, J2C can be invoked anywhere in Julia, not only in the LLVM IR code generation
+    phase.
