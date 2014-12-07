@@ -1734,9 +1734,9 @@ static void j2c_assignment(jl_value_t *l, jl_value_t *r, jl_codectx_t *ctx, jl_v
 }		
 
 // return a tuple containing the dimensions of the array
-static void j2c_arraysize(jl_value_t *a, uint32_t index, jl_codectx_t *ctx, jl_value_t *ast_node)
+static void j2c_arraysize(jl_value_t *a, uint32_t index, jl_codectx_t *ctx, jl_value_t *expr)
 {
-	ast_node_result_t* result = get_ast_node_result(ast_node, ctx);
+	ast_node_result_t* result = get_ast_node_result(expr, ctx);
 	ast_node_result_t* a1 = get_ast_node_result(a, ctx);
 	CONNECT_PARENT_CHILD(result, a1);
 		
