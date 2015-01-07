@@ -26,6 +26,9 @@ function getenv(var::String)
   bytestring(val)
 end
 
+julia_root = getenv("JULIA_ROOT")
+
+# Force inline a function
 function inline(function_name, signature)
   m = methods(function_name, signature)
   if length(m) < 1
@@ -38,15 +41,112 @@ function inline(function_name, signature)
   def.j2cflag = convert(Int32, 1)
 end
 
+function typeOfOpr(x)
+  if isa(x, Expr) x.typ
+  elseif isa(x, SymbolNode) x.typ
+  else typeof(x)
+  end
+end
+
+# Convert regular Julia types to make them appropriate for calling C code.
+function convert_to_ccall_typ(typ)
+  # if there a better way to check for typ being an array DataType?
+  if isa(typ, DataType) && typ.name == Array.name
+    # If it is an Array type then convert to Ptr type.
+    return (Ptr{eltype(typ)},ndims(typ))
+  elseif is(typ, ()) 
+    return (Void, 0)
+  else
+    # Else no conversion needed.
+    return (typ,0)
+  end
+end
+
+# dims is array of arrays from converting the datatype signature
+# ret_dims is an array of dimensions for the reurn type
+function sig_dims_to_args(dims)
+  # add an Int64 argument for each array dimension we have
+  ret = DataType[]
+  for i = 1:length(dims)
+    for j = 1:dims[i]
+      push!(ret, Int64)
+    end 
+  end
+  ret
+end
+
+# Convert a whole function signature in a form of a tuple to something appropriate for calling C code.
+function convert_sig(sig)
+  assert(isa(typeof(sig),Tuple))   # make sure we got a tuple
+  new_tuple = Expr(:tuple)         # declare the new tuple
+  # fill in the new_tuple args/elements by converting the individual elements of the incoming signature
+  new_tuple.args = [ convert_to_ccall_typ(sig[i])[1] for i = 1:length(sig) ]
+  sig_ndims      = [ convert_to_ccall_typ(sig[i])[2] for i = 1:length(sig) ]
+  append!(new_tuple.args,sig_dims_to_args(sig_ndims))
+  return (eval(new_tuple), sig_ndims)
+end
+
 function offload(function_name, signature)
+  # get information about code for the given function and signature
+  ct           = code_typed(function_name, signature)
+  code         = ct[1]
+  # set j2cflag properly
   m            = methods(function_name, signature)
   def          = m[1].func.code
   def.j2cflag  = convert(Int32, 2)
-end
+  # Same the number of statements so we can get the last one.
+  num_stmts    = length(ct[1].args[3].args)
+  # Get the return type of the function by looking at the last statement 
+  last_stmt    = ct[1].args[3].args[num_stmts]
+  if isa(last_stmt, Expr) && is(last_stmt.head, :return)
+    typ = typeOfOpr(last_stmt.args[1])
+    (ret_type,ret_dims) = convert_to_ccall_typ(typ)
+  else
+    error("Last statement is not a return: ", last_stmt)
+  end
 
-julia_root = getenv("JULIA_ROOT")
-libname = string(julia_root, "/j2c/libout.so.1.0")
-println(libname)
+  proxy_name   = string(function_name,"_j2c_proxy")
+  proxy_sym    = symbol(proxy_name)
+  j2c_name     = string(function_name,"_")
+  dyn_lib      = string(julia_root, "/j2c/libout.so.1.0")
+
+  # Convert Arrays in signature to Ptr and add extra arguments for array dimensions
+  (modified_sig, sig_dims) = convert_sig(signature)
+
+  # Create a set of expressions to pass as arguments to specify the array dimension sizes.
+  extra_args = Any[]
+  for(i = 1:length(sig_dims)) 
+    for(j = 1:sig_dims[i])
+      push!(extra_args, quote size($(code.args[1][i]),$(j)) end)
+    end
+  end
+
+  # Are we returning an array?
+  if (ret_dims > 0)
+    tuple_sig_expr = Expr(:tuple,modified_sig...,Cint,Ptr{Cint})
+    func = @eval function ($proxy_sym)($(code.args[1]...))
+             ret_out_dims = zeros(Cint,$ret_dims) 
+             result = ccall(($j2c_name, $dyn_lib), $ret_type, $tuple_sig_expr, 
+                            $(code.args[1]...), $(extra_args...), $ret_dims, ret_out_dims)
+             if(prod(ret_out_dims) == 0)
+               throw(string("j2c code did not fill in at least one dimension for proxy ", $proxy_name))
+             end
+             rod64 = convert(Array{Int64,1},ret_out_dims)
+             # Convert the result we get back from a pointer to an array.
+             # The total size is the prod of the dimensions in ret_out_dims.
+             # "true" says that Julia owns the returned memory and can free it with regular GC.
+             # After getting array the right size we then reshape it again using ret_out_dims.
+             reshape(pointer_to_array(result,prod(ret_out_dims),true),tuple(rod64...))
+          end
+  else
+    tuple_sig_expr = Expr(:tuple,Cint,modified_sig...)
+    func = @eval function ($proxy_sym)($(code.args[1]...))
+             ccall(($j2c_name, $dyn_lib), $ret_type, $tuple_sig_expr, 
+                            $(code.args[1]...), $(extra_args...))
+          end
+  end
+  return func
+end
 
 function sumOfThree(N::Int)
   a=[ (i*N+j)*11.0 for i=1:N, j=1:N]
@@ -56,21 +156,32 @@ function sumOfThree(N::Int)
   return d
 end
 
-offload(sumOfThree, (Int,))
-# warm up, will trigger j2c compilation, but will not run
-sumOfThree(1)
-
-@eval function j2c_sumOfThree(N::Int)
-  ret_out_dims = zeros(Cint, 2)
-  result = ccall((:sumOfThree_, $(libname)), Ptr{Float64}, (Int, Int, Int, Ptr{Cint},), -1, N, 1, ret_out_dims)
-  rod64 = convert(Array{Int,1}, ret_out_dims)
-  reshape(pointer_to_array(result,prod(ret_out_dims),true),tuple(rod64...))
+function powOfTwo(a::Array{Float64,2})
+  return a .* a
 end
 
-for sizea = 1:1  #100
-  N = sizea * 1000
+# Here is a sample of calling j2c functions directly.
+# libname = string(julia_root, "/j2c/libout.so.1.0")
+# println(libname)
+# @eval function j2c_sumOfThree(N::Int)
+#   ret_out_dims = zeros(Cint, 2)
+#   result = ccall((:sumOfThree_, $(libname)), Ptr{Float64}, (Int, Int, Ptr{Cint},), N, 1, ret_out_dims)
+#   rod64 = convert(Array{Int,1}, ret_out_dims)
+#   reshape(pointer_to_array(result,prod(ret_out_dims),true),tuple(rod64...))
+# end
+
+# Alternatively, we may use the offload function to automatically 
+# generate the above wrapper.
+j2c_sumOfThree = offload(sumOfThree, (Int,))
+j2c_powOfTwo   = offload(powOfTwo, (Array{Float64,2},))
+
+# Warm up, will trigger j2c compilation
+powOfTwo(sumOfThree(1))
+
+for sizea = 1:10  #100
+  N = sizea * 100
   println("\n****Matrix size: ", N, "*", N)
-  d=j2c_sumOfThree(N)
-  println("sum=", sum(d))
+  a=j2c_sumOfThree(N)
+  b=j2c_powOfTwo(a)
+  println("checksum =", sum(a), " ", sum(b))
 end
-
