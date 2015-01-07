@@ -1115,9 +1115,11 @@ static void dump_entry_function(FILE* fs, ast_node_result_t *func_result)
 	}
 	p++;
 			
-    fprintf(fs, "_(int run_where");
+    fprintf(fs, "_(");
 	p++;
-    if (*p != ')') {
+	bool first = true;
+    if (*p != ')' && !first) {
+		first = false;
 	    fprintf(fs, ", ");
     }
 	for (; *p != ')'; p++) {
@@ -1128,57 +1130,13 @@ static void dump_entry_function(FILE* fs, ast_node_result_t *func_result)
 	if (return_array_str != NULL && *return_array_str != 0) { 	
 		// if the return is an array, that array space must have been allocated in the Julia heap, and the pointer 
 		// and the size of the array (# array elements) must be passed to C function so that we can fill contents into the space.
-		
-		fprintf(fs, "if (run_where >= 0) {\n");
-        fprintf(fs, "%s ret_return;\n", return_array_str);
-        fprintf(fs, "%s ret_temp;\n", return_array_str);
-#ifndef ICC13
-        fprintf(fs, "%s ret_temp2;\n", return_array_str);
-#endif
-        fprintf(fs, "int prod_index;\n");
-        fprintf(fs, "int outsize;\n");
-
-	fprintf(fs, "#pragma offload %s inout(out_ret_dims:length(num_dims)) nocopy(ret_temp)\n{\n", offload_clauses);
-	fprintf(fs, "ret_temp = ", return_array_str);
-	dump_a_call_to_root_func(fs);
-        fprintf(fs, "}\n");
-        fprintf(fs, "outsize = out_ret_dims[0];\n");
-        fprintf(fs, "for(prod_index = 1; prod_index < num_dims; ++prod_index) outsize *= out_ret_dims[prod_index];\n");
-        fprintf(fs, "%s just_for_size;\n",return_array_str);
-        fprintf(fs, "int array_elem_size = sizeof(*just_for_size);\n");
-        fprintf(fs, "ret_return = (%s)malloc(outsize * array_elem_size);\n",return_array_str);
-#ifdef ICC13
-        fprintf(fs, "#pragma offload in(outsize) out(ret_return[0:outsize]) nocopy(ret_temp)\n{\n");
-        fprintf(fs, "memcpy(ret_return,ret_temp,outsize * array_elem_size);\n");
-        //fprintf(fs, "free(ret_temp);\n");
-        fprintf(fs, "}\n");
-#else
-        fprintf(fs, "#pragma offload out(ret_temp2[0:outsize] : into(ret_return[0:outsize]) alloc_if(1) preallocated targetptr) nocopy(ret_temp)\n{\n");
-        fprintf(fs, "ret_temp2 = ret_temp;\n");
-        //fprintf(fs, "free(ret_temp);\n");
-        fprintf(fs, "}\n");
-#endif
-        fprintf(fs, "return ret_return;\n");
-      
-		fprintf(fs, "} else {\n");
 		fprintf(fs, "return ");
 		dump_a_call_to_root_func(fs);
-		fprintf(fs, "}\n");
 	}
 	else {
 	    assert(return_non_array_str != NULL && *return_non_array_str != 0);
-
-		fprintf(fs, "if (run_where >= 0) {\n");
-        fprintf(fs, "%s ret_return;\n", return_non_array_str);
-		fprintf(fs, "#pragma offload target(mic) %s out(ret_return)\n{\n", offload_clauses);
-		fprintf(fs, "ret_return = ");
-		dump_a_call_to_root_func(fs);
-        fprintf(fs, "}\n");
-        fprintf(fs, "return ret_return;\n");
-		fprintf(fs, "} else {\n");
 		fprintf(fs, "return ");
 		dump_a_call_to_root_func(fs);		
-		fprintf(fs, "}\n");
 	}
 	fprintf(fs, "}\n");		
 }
@@ -2051,10 +2009,12 @@ static void j2c_jlcall(jl_codectx_t *ctx, jl_value_t *expr)
 				// from jl_is_array_type(shape1->result_var_type). The latter is correct.
 				if (jl_is_array_type(shape1->result_var_type)) {				
 					jl_value_t* result_type = result->result_var_type; //expr_type(expr, ctx);
+					/*
 					JL_PRINTF(JL_STDOUT, "&&& here is\n");
 					jl_static_show(JL_STDOUT, result_type);
 					JL_PRINTF(JL_STDOUT, "&&& tttt is\n");
 					jl_static_show(JL_STDOUT, expr_type(expr, ctx));
+					*/
 					// in case the corresponding c type has not been created
 					create_c_type(result_type);
 					ASSERT(jl_is_tuple(result_type), result_type, "Tuple type is expected to return from broadcast_shape");	
