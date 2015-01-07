@@ -20,6 +20,8 @@
  * THE SOFTWARE.
  *
  */
+#ifndef PSE_TYPES
+#define PSE_TYPES
 
 #define DEF_C_ARRAY(ELEMENT_TYPE, TYPENAME) \
 TYPENAME##_array inline new_##TYPENAME##_array_1d(ELEMENT_TYPE* _data, unsigned _N1) { \
@@ -169,3 +171,4 @@ int64_t inline checked_smul(int64_t a, int64_t b)
 #define ALLOC alloc_if(1) free_if(0) 
 #define FREE alloc_if(0) free_if(1) 
 #define REUSE alloc_if(0) free_if(0) 
+#endif
